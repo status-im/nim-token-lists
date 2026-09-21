@@ -22,6 +22,7 @@ static void* create_destroy(void* arg) {
 static atomic_int stop_readers;
 static atomic_ulong read_count;
 static uint64_t stress_handle;
+static struct timespec stress_start;
 
 static void* read_snapshot(void* unused) {
   (void)unused;
@@ -33,6 +34,11 @@ static void* read_snapshot(void* unused) {
     assert(tkl_get_all(stress_handle, &buf) == TKL_OK);
     tkl_buf_free(&buf);
     atomic_fetch_add(&read_count, 1);
+    struct timespec now;
+    assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+    if ((now.tv_sec - stress_start.tv_sec) +
+        (now.tv_nsec - stress_start.tv_nsec) / 1e9 >= 2.0)
+      atomic_store(&stop_readers, 1);
   }
   return NULL;
 }
@@ -43,6 +49,7 @@ static void stress(void) {
   assert(tkl_stage_tokens(stress_handle, TOKENS, strlen(TOKENS), &id) == TKL_OK);
   assert(tkl_commit(stress_handle, id, &revision) == TKL_OK);
   pthread_t readers[16];
+  assert(clock_gettime(CLOCK_MONOTONIC, &stress_start) == 0);
   for (int i = 0; i < 16; ++i)
     assert(pthread_create(&readers[i], NULL, read_snapshot, NULL) == 0);
   struct timespec start, now;

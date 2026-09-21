@@ -31,3 +31,5 @@ make test-go
 Go tests cover concurrent access and handle destruction.
 
 Run `make bench` for Go binding benchmarks.
+
+Symbol-isolation tooling and coexistence probes are included for embedding the library alongside other Nim libraries.
