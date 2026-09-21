@@ -2,9 +2,10 @@
 
 import std/unicode
 import json_serialization
+import json_serialization/pkg/results as jsonResults
 import faststreams/inputs
 import ./[types, errors, keys]
-export json_serialization
+export json_serialization, jsonResults
 
 proc readValue*(
     reader: var JsonReader, value: var uint64
@@ -22,7 +23,7 @@ proc readValue*(
 
 proc decodeDocument*[T](
     data: string, kind: typedesc[T],
-    limits: ParseLimits = DefaultParseLimits, sourceId = ""
+    limits: ParseLimits = DefaultParseLimits, sourceId = "", requireFields = false
 ): Result[T, TklError] =
   ## Only memory input is used. Exceptions are adapted at this boundary.
   mixin readValue
@@ -45,8 +46,10 @@ proc decodeDocument*[T](
   )
   try:
     let stream = memoryInput(data)
-    var reader = JsonReader[DefaultFlavor].init(
-      stream, {JsonReaderFlag.allowUnknownFields}, conf)
+    var flags = {JsonReaderFlag.allowUnknownFields}
+    if requireFields:
+      flags.incl JsonReaderFlag.requireAllFields
+    var reader = JsonReader[DefaultFlavor].init(stream, flags, conf)
     let decoded = reader.readValue(T)
     while stream.readable:
       if char(stream.read()) notin {' ', '\t', '\r', '\n'}:
