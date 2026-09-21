@@ -5,11 +5,13 @@ import ../[types, errors, keys, jsoncodec]
 export types, errors, jsoncodec
 
 type
+  WireTags = distinct JsonString
+
   WireList* = object
     name*: string
     timestamp*: string
     version*: Version
-    tags*: JsonString
+    tags*: WireTags
     logoURI*: string
     keywords*: seq[string]
     tokens*: seq[JsonString]
@@ -37,6 +39,13 @@ type
     contracts*: Contracts
 
 proc readValue*(
+    reader: var JsonReader, value: var WireTags
+) {.raises: [IOError, SerializationError].} =
+  if reader.tokKind notin {JsonValueKind.Object, JsonValueKind.Null}:
+    reader.raiseUnexpectedValue("TagsObjectRequired")
+  value = WireTags(reader.parseAsString())
+
+proc readValue*(
     reader: var JsonReader, value: var Contracts
 ) {.raises: [IOError, SerializationError].} =
   var contracts: seq[Contract]
@@ -56,7 +65,7 @@ proc readValue*(
 func initParsed*(wire: WireList, sourceId: string): ParsedList =
   ParsedList(list: TokenList(
     id: sourceId, name: wire.name, timestamp: wire.timestamp,
-    version: wire.version, tags: wire.tags, logoUri: wire.logoURI,
+    version: wire.version, tags: JsonString(wire.tags), logoUri: wire.logoURI,
     keywords: wire.keywords,
   ))
 

@@ -102,3 +102,24 @@ suite "bounded token parsers":
     check parseStandard("""{"name":"long"}""", [], limits = limits).isErr
     limits.maxStringBytes = 0
     check parseStandard("{}", [], limits = limits).isErr
+
+  test "tags retain the SDK object or null shape":
+    for bad in ["1", "[]", "\"text\""]:
+      let data = "{\"tags\":" & bad & "}"
+      check parseStandard(data, []).isErr
+      check parseStatus(data, []).isErr
+    for valid in ["null", "{}", "{\"tag\":{\"name\":\"X\"}}"]:
+      let data = "{\"tags\":" & valid & "}"
+      check parseStandard(data, []).isOk
+      check parseStatus(data, []).isOk
+
+  test "duplicate object fields reject instead of concatenating arrays":
+    for data in [
+      "{\"tokens\":[" & row() & "],\"tokens\":[]}",
+      "{\"keywords\":[\"a\"],\"keywords\":[]}",
+      "{\"version\":{\"major\":1},\"version\":{\"minor\":2}}",
+      "{\"extension\":{\"a\":1,\"a\":2}}",
+      "{\"name\":\"a\",\"\\u006eame\":\"b\"}"
+    ]:
+      check parseStandard(data, [1'u64]).isErr
+      check parseStatus(data, [1'u64]).isErr

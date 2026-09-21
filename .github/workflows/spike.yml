@@ -12,6 +12,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: jiro4989/setup-nim-action@v2
         with:
           nim-version: '2.2.10'
@@ -25,6 +27,7 @@ jobs:
           install: mingw-w64-x86_64-gcc make
           path-type: inherit
       - run: make test-nim NIM=nim
+      - run: make test-core NIM=nim
       - run: make test-c NIM=nim
       - run: make test-go NIM=nim
       - if: runner.os != 'Windows'

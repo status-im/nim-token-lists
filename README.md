@@ -20,6 +20,7 @@ The new core types and parsers are separate from the prototype snapshot and are 
 - `go/tkl/`: cgo wrapper and Go tests.
 - `tests/`: implementation tests.
 - `scripts/`: build and verification tools.
+- `fixtures/`: token-list samples used for compatibility tests.
 
 ## Build and test
 
@@ -32,7 +33,7 @@ mkdir -p build
 make test-nim
 make test-c
 make test-go
-bash scripts/test_core.sh test_keys test_parsers test_validators
+make test-core
 ```
 
 Go tests cover concurrent access and handle destruction.
