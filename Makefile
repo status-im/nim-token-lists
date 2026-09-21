@@ -1,0 +1,21 @@
+NIM ?= nim
+NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcache:build/nimcache-tests
+
+.PHONY: lib test-nim test-c test-go bench isolate audit clean
+lib:
+	NIM="$(NIM)" scripts/build_lib.sh
+test-nim:
+	"$(NIM)" c -r $(NIM_TEST_FLAGS) -o:build/test_snapshot tests/core/test_snapshot.nim
+test-c: lib
+	cc -std=c11 -Wall -Wextra -o build/smoke tests/abi/smoke.c -Iabi build/libtkl.a -lpthread -lm
+	build/smoke
+test-go: lib
+	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 ./...
+bench: lib
+	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -run '^$$' -bench . -benchmem ./...
+isolate: lib
+	scripts/isolate_lib.sh
+audit: isolate
+	scripts/audit_symbols.sh build/libtkl_isolated.a
+clean:
+	rm -rf build
