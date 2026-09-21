@@ -2,6 +2,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <time.h>
 #include "tkl.h"
 
 static const char* TOKENS =
@@ -15,6 +17,48 @@ static void* create_destroy(void* arg) {
   assert(h != 0);
   assert(tkl_destroy(h) == TKL_OK);
   return NULL;
+}
+
+static atomic_int stop_readers;
+static atomic_ulong read_count;
+static uint64_t stress_handle;
+
+static void* read_snapshot(void* unused) {
+  (void)unused;
+  const char* key = "1-0xabcdef0000000000000000000000000000000001";
+  while (!atomic_load(&stop_readers)) {
+    TklBuf buf = {0};
+    assert(tkl_get_by_key(stress_handle, key, strlen(key), &buf) == TKL_OK);
+    tkl_buf_free(&buf);
+    assert(tkl_get_all(stress_handle, &buf) == TKL_OK);
+    tkl_buf_free(&buf);
+    atomic_fetch_add(&read_count, 1);
+  }
+  return NULL;
+}
+
+static void stress(void) {
+  uint64_t id, revision;
+  assert(tkl_create(TKL_ABI_VERSION, &stress_handle) == TKL_OK);
+  assert(tkl_stage_tokens(stress_handle, TOKENS, strlen(TOKENS), &id) == TKL_OK);
+  assert(tkl_commit(stress_handle, id, &revision) == TKL_OK);
+  pthread_t readers[16];
+  for (int i = 0; i < 16; ++i)
+    assert(pthread_create(&readers[i], NULL, read_snapshot, NULL) == 0);
+  struct timespec start, now;
+  assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+  unsigned commits = 0;
+  do {
+    assert(tkl_stage_tokens(stress_handle, TOKENS, strlen(TOKENS), &id) == TKL_OK);
+    assert(tkl_commit(stress_handle, id, &revision) == TKL_OK);
+    ++commits;
+    assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+  } while ((now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9 < 2.0);
+  atomic_store(&stop_readers, 1);
+  for (int i = 0; i < 16; ++i) assert(pthread_join(readers[i], NULL) == 0);
+  assert(atomic_load(&read_count) > 0);
+  assert(tkl_destroy(stress_handle) == TKL_OK);
+  printf("STRESS OK commits=%u reads=%lu\n", commits, atomic_load(&read_count));
 }
 
 int main(void) {
@@ -79,6 +123,7 @@ int main(void) {
   assert(tkl_get_all(h, &buf) == TKL_INVALID_HANDLE);
   assert(tkl_revision(h) == 0);
 
+  stress();
   puts("SMOKE OK");
   return 0;
 }
