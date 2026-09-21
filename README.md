@@ -29,3 +29,5 @@ make test-go
 ```
 
 Go tests cover concurrent access and handle destruction.
+
+Run `make bench` for Go binding benchmarks.
