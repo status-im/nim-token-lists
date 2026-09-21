@@ -84,3 +84,8 @@ suite "registry and native validators":
   test "typed errors carry the requested source":
     let failed = validateDocument("{}", StandardFormat, "uniswap")
     check failed.error.sourceId == "uniswap"
+
+  test "duplicate registry arrays reject":
+    let data = "{\"tokenLists\":[{\"id\":\"a\"}],\"tokenLists\":[]}"
+    check parseRegistry(data).isErr
+    check validateDocument(data, RegistryFormat).error.code == InvalidArgument

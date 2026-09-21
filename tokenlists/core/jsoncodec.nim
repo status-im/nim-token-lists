@@ -1,11 +1,30 @@
 {.push raises: [], gcsafe.}
 
-import std/unicode
+import std/[sets, unicode]
 import json_serialization
 import json_serialization/pkg/results as jsonResults
 import faststreams/inputs
 import ./[types, errors, keys]
 export json_serialization, jsonResults
+
+proc checkUniqueFields(
+    reader: var JsonReader
+) {.raises: [IOError, SerializationError].} =
+  # The typed dependency reader appends duplicate array fields. Reject all
+  # duplicate object keys, including unknown extensions, before materializing.
+  case reader.tokKind
+  of JsonValueKind.Object:
+    var seen: HashSet[string]
+    reader.parseObjectWithoutSkip(key):
+      if key in seen:
+        reader.raiseUnexpectedValue("DuplicateObjectField")
+      seen.incl key
+      checkUniqueFields(reader)
+  of JsonValueKind.Array:
+    reader.parseArray:
+      checkUniqueFields(reader)
+  else:
+    discard reader.readValue(JsonVoid)
 
 proc readValue*(
     reader: var JsonReader, value: var uint64
@@ -50,11 +69,12 @@ proc decodeDocument*[T](
     if requireFields:
       flags.incl JsonReaderFlag.requireAllFields
     var reader = JsonReader[DefaultFlavor].init(stream, flags, conf)
-    let decoded = reader.readValue(T)
+    checkUniqueFields(reader)
     while stream.readable:
       if char(stream.read()) notin {' ', '\t', '\r', '\n'}:
         return err(tklError(InvalidArgument, "TrailingData", sourceId))
-    ok(decoded)
+    var typedReader = JsonReader[DefaultFlavor].init(memoryInput(data), flags, conf)
+    ok(typedReader.readValue(T))
   except SerializationError as e:
     err(tklError(InvalidArgument, e.msg, sourceId))
   except IOError as e:
