@@ -7,6 +7,7 @@ import ./rwlock
 const
   TklAbiVersion = 1'u32
   MaxHandles = 64
+  TklMaxInputBytes {.intdefine.} = 16 * 1024 * 1024
   TklOk = 0'i32
   TklNotFound = 1'i32
   TklBusy = 5'i32
@@ -16,6 +17,9 @@ const
   TklClosed = 15'i32
   TklAbiMismatch = 16'i32
   TklInternal = 17'i32
+
+static:
+  doAssert TklMaxInputBytes > 0
 
 type
   TklBuf {.bycopy.} = object
@@ -158,7 +162,7 @@ proc tkl_destroy(handle: uint64): int32 {.tklExport.} =
 proc tkl_stage_tokens(
     handle: uint64, json: cstring, len: csize_t, outStagedId: ptr uint64
 ): int32 {.tklExport.} =
-  if json.isNil or outStagedId.isNil:
+  if json.isNil or outStagedId.isNil or len > csize_t(TklMaxInputBytes):
     return TklInvalidArgument
   var idx: int
   var h: ptr HandleObj
@@ -202,8 +206,9 @@ proc tkl_commit(
   h.current = h.staged
   h.staged = nil
   let rev = h.revision.fetchAdd(1) + 1
-  freeSnapshotPtr(old)
   h.rw.releaseWrite()
+  # The swap excludes every old reader. In-flight tracking keeps h alive.
+  freeSnapshotPtr(old)
   outRevision[] = rev
   TklOk
 
@@ -225,7 +230,7 @@ proc tkl_abort(handle: uint64, stagedId: uint64): int32 {.tklExport.} =
 proc tkl_get_by_key(
     handle: uint64, key: cstring, keyLen: csize_t, outBuf: ptr TklBuf
 ): int32 {.tklExport.} =
-  if key.isNil or outBuf.isNil:
+  if key.isNil or outBuf.isNil or keyLen > csize_t(TklMaxInputBytes):
     return TklInvalidArgument
   var idx: int
   var h: ptr HandleObj
