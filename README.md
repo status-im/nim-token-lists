@@ -7,6 +7,9 @@ A Nim library for fungible-token lists.
 - A prototype snapshot with JSON input, token lookup and first-occurrence deduplication.
 - A C ABI exposing the prototype snapshot.
 - A Go wrapper that calls the library through C bindings.
+- Token and registry types, normalized token identities, typed errors and custom-token validation.
+
+The new core types are separate from the prototype snapshot and are not exposed through the bindings yet.
 
 ## Source layout
 
@@ -22,10 +25,12 @@ Install Nim 2.2.10 and make `nim` available on `PATH`.
 Set `NIM` only if you need to select a different compiler executable.
 
 ```sh
+git submodule update --init
 mkdir -p build
 make test-nim
 make test-c
 make test-go
+bash scripts/test_core.sh test_keys
 ```
 
 Go tests cover concurrent access and handle destruction.

@@ -1,7 +1,9 @@
 NIM ?= nim
 NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcache:build/nimcache-tests
 
-.PHONY: lib test-nim test-c test-go bench isolate audit clean
+.PHONY: lib test-core test-nim test-c test-go bench isolate audit clean
+test-core:
+	NIM="$(NIM)" bash scripts/test_core.sh
 lib:
 	NIM="$(NIM)" scripts/build_lib.sh
 test-nim:
