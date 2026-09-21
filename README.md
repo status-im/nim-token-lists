@@ -9,6 +9,7 @@ A Nim library for fungible-token lists.
 - A Go wrapper that calls the library through C bindings.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
 - Standard and Status token-list parsers, including expansion of Status contracts by chain.
+- Registry parsing and native validation of supported list formats.
 
 The new core types and parsers are separate from the prototype snapshot and are not exposed through the bindings yet.
 
@@ -31,7 +32,7 @@ mkdir -p build
 make test-nim
 make test-c
 make test-go
-bash scripts/test_core.sh test_keys test_parsers
+bash scripts/test_core.sh test_keys test_parsers test_validators
 ```
 
 Go tests cover concurrent access and handle destruction.
