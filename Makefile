@@ -9,6 +9,8 @@ test-nim:
 test-c: lib
 	cc -std=c11 -Wall -Wextra -o build/smoke tests/abi/smoke.c -Iabi build/libtkl.a -lpthread -lm
 	build/smoke
+	cc -std=c11 -Wall -Wextra -o build/lengths tests/abi/lengths.c -Iabi build/libtkl.a -lpthread -lm
+	build/lengths
 test-go: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 ./...
 bench: lib
@@ -16,6 +18,6 @@ bench: lib
 isolate: lib
 	scripts/isolate_lib.sh
 audit: isolate
-	scripts/audit_symbols.sh build/libtkl_isolated.a
+	bash tests/symbols/test_audit.sh
 clean:
 	rm -rf build

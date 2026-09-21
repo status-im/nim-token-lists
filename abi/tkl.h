@@ -10,6 +10,11 @@ extern "C" {
 
 #define TKL_ABI_VERSION 1u
 
+/* Input byte lengths are capped at 16 MiB by default. The spike build may
+   override this with Nim -d:TklMaxInputBytes=<positive integer>.
+   Oversized inputs return TKL_INVALID_ARGUMENT before reading the pointer.
+   Stage 1 must expose the agreed per-instance maxBytes configuration. */
+
 enum {
   TKL_OK = 0, TKL_NOT_FOUND = 1, TKL_UNCHANGED = 2, TKL_ABORTED = 3,
   TKL_SUPERSEDED_PLAN = 4, TKL_BUSY = 5, TKL_PARTIAL_SUCCESS = 6,

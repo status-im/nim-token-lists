@@ -33,3 +33,6 @@ Go tests cover concurrent access and handle destruction.
 Run `make bench` for Go binding benchmarks.
 
 Symbol-isolation tooling and coexistence probes are included for embedding the library alongside other Nim libraries.
+Run `make audit` to check the exported-symbol contract.
+
+C tests cover buffer lengths and ABI argument handling.

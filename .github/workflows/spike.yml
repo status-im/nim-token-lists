@@ -1,0 +1,31 @@
+name: spike
+on: workflow_dispatch
+jobs:
+  abi:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.10'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+          path-type: inherit
+      - run: make test-nim NIM=nim
+      - run: make test-c NIM=nim
+      - run: make test-go NIM=nim
+      - if: runner.os != 'Windows'
+        run: make audit NIM=nim
