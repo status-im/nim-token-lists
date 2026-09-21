@@ -1,0 +1,76 @@
+{.push raises: [], gcsafe.}
+
+import json_serialization/types
+import ./errors
+export errors, types
+
+type
+  TokenIdentity* = object
+    chainId*: uint64
+    address*: string
+
+  Token* = object
+    chainId*: uint64
+    address*: string
+    crossChainId*: string
+    decimals*: uint8
+    name*: string
+    symbol*: string
+    logoUri*: string
+    custom*: bool
+
+  Version* = object
+    major*: uint64
+    minor*: uint64
+    patch*: uint64
+
+  TokenList* = object
+    id*: string
+    name*: string
+    timestamp*: string
+    fetchedTimestamp*: string
+    source*: string
+    version*: Version
+    tags*: JsonString
+    logoUri*: string
+    keywords*: seq[string]
+    tokens*: seq[Token]
+
+  RowDiagnostic* = object
+    error*: TklError
+    row*: int
+    chainId*: uint64
+
+  ParsedList* = object
+    list*: TokenList
+    diagnostics*: seq[RowDiagnostic]
+
+  ListFormat* = enum
+    StandardFormat, StatusFormat, RegistryFormat
+
+  ListSource* = object
+    id*: string
+    sourceUrl*: string
+    schema*: string
+
+  Registry* = object
+    timestamp*: string
+    version*: Version
+    tokenLists*: seq[ListSource]
+
+  ParseLimits* = object
+    maxBytes*: int
+    maxDepth*: int
+    maxArrayItems*: int
+    maxObjectMembers*: int
+    maxStringBytes*: int
+
+const
+  NativeAddress* = "0x0000000000000000000000000000000000000000"
+  DefaultParseLimits* = ParseLimits(
+    maxBytes: 16 * 1024 * 1024,
+    maxDepth: 64,
+    maxArrayItems: 100_000,
+    maxObjectMembers: 4096,
+    maxStringBytes: 1024 * 1024,
+  )
