@@ -42,6 +42,8 @@ Go tests cover concurrent access and handle destruction.
 Run `make bench` for Go binding benchmarks.
 Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
+Run `make bench-catalogue` to measure custom updates, owned snapshot copies and
+direct lookups using all eight embedded lists in a release build.
 
 Symbol-isolation tooling and coexistence probes are included for embedding the library alongside other Nim libraries.
 Run `make audit` to check the exported-symbol contract.

@@ -11,6 +11,40 @@ func body(symbol: string, address = a): string =
     "\",\"symbol\":\"" & symbol & "\",\"decimals\":18}]}"
 
 suite "catalogue builder and immutable queries":
+  test "index diff detects order and raw-only changes":
+    let rows = body("A")[0 ..< body("A").len - 2] & "," &
+      body("B", b)[11 ..< body("B", b).len]
+    let reversed = body("B", b)[0 ..< body("B", b).len - 2] & "," &
+      body("A")[11 ..< body("A").len]
+    let before = buildCatalogue(CatalogueConfig(chains: @[1'u64],
+      initialLists: @[ListContent(id: "list", body: rows)])).get
+    let after = buildCatalogue(CatalogueConfig(chains: @[1'u64],
+      initialLists: @[ListContent(id: "list", body: reversed)])).get
+    check diffSnapshots(before, after).chains == @[1'u64]
+    check diffSnapshots(before, after).lists == @["list"]
+    check diffSnapshots(before, before).chains.len == 0
+    let skippedConfig = CatalogueConfig(chains: @[1'u64],
+      policy: CataloguePolicy(skippedKeys: @["1-" & a]),
+      initialLists: @[ListContent(id: "list", body: body("A"))])
+    var editedConfig = skippedConfig
+    editedConfig.initialLists[0].body = body("EDITED")
+    let delta = diffSnapshots(buildCatalogue(skippedConfig).get,
+      buildCatalogue(editedConfig).get)
+    check delta.chains.len == 0
+    check delta.lists == @["list"]
+
+  test "parsed source cache supports chain changes without reading JSON again":
+    var config = CatalogueConfig(chains: @[1'u64], initialLists: @[
+      ListContent(id: "list", body: body("TEN").replace("\"chainId\":1", "\"chainId\":10"))])
+    let cache = parseCatalogueSources(config).get
+    config.initialLists[0].body = "not JSON"
+    let hidden = buildFromParsed(cache, @[1'u64]).get
+    check hidden.getList("list").get.tokens.len == 0
+    check hidden.getDiagnostics().items[0].code == UnsupportedChain
+    let visible = buildFromParsed(cache, @[10'u64]).get
+    check visible.getByKey("10-" & a).get.symbol == "TEN"
+    check visible.getDiagnostics().items.len == 0
+
   test "source priority is deterministic and raw lists retain duplicates":
     let config = CatalogueConfig(chains: @[1'u64], mainListId: "main",
       initialLists: @[
