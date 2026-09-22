@@ -94,6 +94,11 @@ and only then commit. A refresh first requests the registry, then its supported
 list sources. Each response batch must contain exactly one result per request;
 missing, duplicate and unexpected IDs are rejected without consuming the round.
 
+Refresh timestamps must fit the UTC range from 1970 through 9999. Writes retain
+integer seconds in `fetchedAt` and format `fetchedTimestamp` as RFC 3339 UTC
+(for example, `1970-01-01T00:00:12Z`) for list metadata and RPC compatibility.
+Formatting uses the supplied value without consulting the system clock or timezone.
+
 Registry errors fall back to the committed or embedded registry. Without a usable
 registry the refresh fails. Newly fetched documents undergo native validation;
 cached list bodies retain the existing permissive parsing contract. Source URLs
@@ -110,6 +115,9 @@ Commit publishes only after the host's durable write succeeds. Abort leaves
 published content, ETags and last-success time unchanged. A wholly failed run
 releases its plan; a partial run can commit the successful writes. An unchanged
 successful commit updates last-success time without a new snapshot revision.
+Publication depends only on snapshot or diagnostic changes. Registry-only writes
+still require persistence and update committed ETags and last-success time, but
+do not advance the catalogue revision when the visible catalogue is unchanged.
 
 Only one refresh plan is live. Force replaces it, and plan IDs are never reused.
 Plans expire after a configurable timeout (300 seconds by default). Apply and
@@ -118,6 +126,8 @@ policy or custom publications therefore supersede old refresh candidates; a
 refresh publication likewise supersedes a prepared custom mutation. Hosts must
 serialize the persist/commit handshake against other mutations so a durable
 write cannot race a superseding publication.
+Host time must not decrease within a live plan: each valid plan check advances
+its time watermark, and earlier apply/commit calls return `TimeBeforePlan`.
 
 Automatic refresh is disabled initially. Positive refresh and retry-check
 intervals are required; `nextDue` returns an optional absolute host timestamp.
