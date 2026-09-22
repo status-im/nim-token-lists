@@ -303,8 +303,8 @@ proc refreshCommit*(
   ?catalogue.planner.checkPlan(planId, now, catalogue.revision, catalogue.epoch)
   if catalogue.refreshId != planId:
     return err(tklError(InvalidArgument, "RefreshNotPrepared"))
-  let changed = catalogue.planner.hasWrites or
-    catalogue.refreshChange.chains.len > 0 or catalogue.refreshChange.lists.len > 0 or
+  let changed = catalogue.refreshChange.chains.len > 0 or
+    catalogue.refreshChange.lists.len > 0 or
     catalogue.refreshDiagnostics != catalogue.diagnostics
   ?catalogue.planner.commitPlan(planId, now, catalogue.revision, catalogue.epoch)
   catalogue.parsed = move(catalogue.refreshParsed)

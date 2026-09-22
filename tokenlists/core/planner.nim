@@ -1,9 +1,13 @@
 {.push raises: [], gcsafe.}
 
-import std/[sets, tables]
+import std/[sets, tables, times]
 import ./[types, validators]
 import ./parsers/[registry, standard, status]
 export types
+
+const
+  LastRfc3339Second = 253402300799'i64 # 9999-12-31T23:59:59Z
+  FetchedTimeFormat = initTimeFormat("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
 type
   RefreshOutcome* {.pure.} = enum
@@ -71,10 +75,10 @@ type
     state: RefreshState
     enabled, networkAllowed: bool
     refreshSec, checkSec, timeoutSec: int64
+    lastSeen: int64
 
 func state*(planner: Planner): RefreshState = planner.state
 func preparedContents*(planner: Planner): seq[ListContent] = planner.candidate
-func hasWrites*(planner: Planner): bool = planner.report.writes.len > 0
 
 func findContent(contents: seq[ListContent], id: string): Opt[ListContent] =
   for content in contents:
@@ -167,7 +171,8 @@ func nextDue*(planner: Planner, now: int64): Result[Opt[int64], TklError] =
 proc startPlan*(
     planner: var Planner, now: int64, revision, epoch: uint64, force = false
 ): Result[RefreshPlan, TklError] =
-  if now < 0 or now > high(int64) - planner.timeoutSec:
+  if now < 0 or now > LastRfc3339Second or
+      now > high(int64) - planner.timeoutSec:
     return err(tklError(InvalidArgument, "InvalidTime"))
   if not planner.networkAllowed:
     return err(tklError(Aborted, "NetworkDisabled"))
@@ -197,16 +202,17 @@ proc startPlan*(
   planner.candidateRegistry = planner.registry
   planner.state.lastAttempt = now
   planner.state.hasAttempt = true
+  planner.lastSeen = now
   ok(planner.plan)
 
 proc checkPlan*(
     planner: var Planner, id: uint64, now: int64, revision, epoch: uint64
 ): Result[void, TklError] =
-  if now < 0:
+  if now < 0 or now > LastRfc3339Second:
     return err(tklError(InvalidArgument, "InvalidTime"))
   if id == 0 or planner.phase == Idle or id != planner.plan.id:
     return err(tklError(InvalidArgument, "UnknownRefreshPlan"))
-  if now < planner.state.lastAttempt:
+  if now < planner.lastSeen:
     return err(tklError(InvalidArgument, "TimeBeforePlan"))
   if now >= planner.plan.expiresAt:
     planner.clearPlan()
@@ -214,6 +220,7 @@ proc checkPlan*(
   if revision != planner.baseRevision or epoch != planner.baseEpoch:
     planner.clearPlan()
     return err(tklError(SupersededPlan, "RefreshSuperseded"))
+  planner.lastSeen = now
   ok()
 
 func fallbackFormat(planner: Planner, id: string): ListFormat =
@@ -221,6 +228,15 @@ func fallbackFormat(planner: Planner, id: string): ListFormat =
     if content.id == id:
       return content.format
   StandardFormat
+
+func utcTime(time: Time): ZonedTime =
+  ZonedTime(time: time, utcOffset: 0, isDst: false)
+
+proc formatFetchedTime(now: int64): string =
+  # Own the timezone locally: times.utc() caches a ref in thread-local state,
+  # which is unsuitable for future callers on foreign threads.
+  let zone = newTimezone("UTC", utcTime, utcTime)
+  fromUnix(now).inZone(zone).format(FetchedTimeFormat)
 
 proc acceptResponse(
     planner: var Planner, request: FetchRequest, response: FetchResult, now: int64
@@ -254,7 +270,7 @@ proc acceptResponse(
       error: valid.error)
   let content = ListContent(id: request.id, source: request.url,
     body: response.body, etag: response.etag, format: request.format,
-    fetchedAt: now, fetchedTimestamp: $now)
+    fetchedAt: now, fetchedTimestamp: formatFetchedTime(now))
   planner.report.writes.add content
   if request.format == RegistryFormat:
     planner.candidateRegistry = content
