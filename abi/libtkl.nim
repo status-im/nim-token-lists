@@ -1,7 +1,7 @@
 {.push raises: [], gcsafe.}
 
 import std/[atomics, locks, options]
-import ../tokenlists/core/snapshot
+import ./spike_snapshot
 import ./rwlock
 
 const
