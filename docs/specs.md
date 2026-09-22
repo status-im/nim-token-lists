@@ -11,12 +11,59 @@ use C bindings to call the Nim implementation.
 - Standard token-list parsing and Status list parsing with per-chain contract expansion.
 - Registry parsing that preserves source order and schema identifiers.
 - Native validation of supported document formats.
+- Deterministic catalogue building, immutable query snapshots and revisioned publication.
+- Custom-token prepare, commit and abort operations.
 - A prototype snapshot, C ABI and cgo wrapper.
 
-The parsers and validators operate on supplied data without network or
-filesystem access. They are not yet connected to the prototype snapshot or
-exposed through the C and Go bindings. Catalogue building, refresh planning
-and status-go integration remain to be implemented.
+The core operates on supplied data without network or filesystem access.
+The catalogue is not yet exposed through the C and Go bindings; those still
+use the isolated prototype in `abi/spike_snapshot.nim`. Refresh planning and
+status-go integration remain to be implemented.
+
+## Catalogue and queries
+
+Source priority is native tokens, the main list, other initial lists sorted
+by ID, remaining stored lists sorted by ID, then custom tokens. The first
+token with a given chain/address key wins. An explicit custom-first policy
+places custom tokens before curated lists, but after native tokens.
+
+Stored content takes precedence over embedded content. A missing, empty or
+corrupt stored initial list falls back to embedded data; failures are reported
+as diagnostics. Invalid remote-only lists are skipped with diagnostics.
+An invalid embedded fallback fails the build without publishing partial state.
+
+Skipped keys affect the unique catalogue, not the retained raw lists.
+Native aliases resolve to a chain's zero-address token unless that alias key
+is skipped. ETH metadata is the default for native tokens; hosts provide
+descriptors for other currencies, such as BNB.
+
+Queries support keys, chain/address pairs, chains, native tokens and raw lists.
+Pages include the snapshot revision and total matching count; a zero limit
+returns all remaining results. Negative offsets or limits are rejected.
+Key queries preserve request order and repetitions while omitting missing
+tokens. Returned values can be modified without changing the source snapshot.
+
+## Publication and custom tokens
+
+`initCatalogue` loads the supplied content and publishes revision one.
+Changing chains or policy rebuilds the catalogue and advances the configuration
+epoch. Failed rebuilds leave the previous configuration and snapshot intact.
+
+Custom changes follow a persistence handshake: prepare validates a normalized
+row or deletion and returns a mutation ID; the host persists it, then calls
+commit to publish immediately. If persistence fails, the host calls abort.
+Only one custom mutation may be pending. A configuration change supersedes a
+pending mutation, so its later commit cannot publish an obsolete snapshot.
+Default priority still prevents custom tokens from overriding curated tokens.
+
+Each publication returns a revision and affected chains and lists, including
+chains whose alias lookup behavior changed. Recent changes are retained in a
+bounded history; an expired cursor requires the host to read a fresh snapshot.
+
+Catalogue state belongs to its caller, which must synchronize mutations and
+snapshot acquisition. Once acquired, a value snapshot remains valid across
+later publications. The existing read/write lock gives queued writers priority
+over new readers. Host persistence and notifications remain outside the core.
 
 ## Parsing and validation
 
