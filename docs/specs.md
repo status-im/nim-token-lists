@@ -121,6 +121,18 @@ rejected by the core. Queries expose empty tag metadata as an empty JSON object.
 The create envelope is capped at 16 MiB; subsequent envelopes use the instance
 byte limit. Embedded document strings may occupy that envelope budget; original
 document limits, including leaf-string limits, are enforced when parsing them.
+Creation also checks each initial-list body and embedded registry against the
+resolved instance byte limit before allocating a handle. Requests with no fields
+use `{}`; zero-length input remains invalid on the C boundary.
+
+The status-go facade must serve hot per-row and per-event lookups from a
+revision-keyed Go mirror. It must not cross the ABI for each activity row or
+Transfer event. A changed revision triggers a bulk `get_all(0,0)` read and atomic
+mirror replacement; mutations and refresh coordination continue through C.
+Typed per-call lookup measured roughly 7–9 microseconds on Apple M2 hardware,
+including cgo and JSON costs, so the mirror is a requirement for the facade.
+`BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode needed
+for mirror refresh. The mirror itself belongs to the subsequent integration phase.
 
 Handles use a bounded registry with generation counters. Destruction rejects new
 calls, waits for in-flight calls and frees state; stale generations are invalid.
