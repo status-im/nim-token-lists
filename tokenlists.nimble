@@ -1,4 +1,4 @@
-version = "0.1.0"
+version = "0.2.0"
 author = "Status"
 description = "Sans-I/O fungible token list core"
 license = "MIT"

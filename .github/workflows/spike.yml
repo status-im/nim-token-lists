@@ -30,8 +30,11 @@ jobs:
       - run: make test-core NIM=nim
       - run: make test-c NIM=nim
       - run: make test-go NIM=nim
+      - run: make test-differential NIM=nim
       - if: runner.os != 'Windows'
         run: make audit NIM=nim
+      - if: runner.os != 'Windows'
+        run: make test-asan NIM=nim
   fuzz:
     runs-on: ubuntu-24.04
     steps:

@@ -1,122 +1,65 @@
 package tkl
 
 import (
-	"encoding/json"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-type benchToken struct {
-	ChainID  uint64 `json:"chainId"`
-	Address  string `json:"address"`
-	Symbol   string `json:"symbol"`
-	Decimals uint   `json:"decimals"`
-}
-
-// ~3 MB of token JSON, the size of wallet_getAllTokens today (Part A §3.3).
-const benchTokens = 32000
-
-func benchHandle(b *testing.B) (*Handle, []byte) {
+func benchmarkCatalogue(b *testing.B) *Handle {
 	b.Helper()
-	h, err := Create()
+	files, err := filepath.Glob("../../fixtures/embedded/*.json")
+	if err != nil || len(files) != 8 {
+		b.Fatal(files, err)
+	}
+	config := Config{Chains: []uint64{1, 10, 8453, 42161}, MainListID: "status"}
+	for _, file := range files {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			b.Fatal(err)
+		}
+		id := strings.TrimSuffix(filepath.Base(file), ".json")
+		format := StandardFormat
+		if id == "status" {
+			format = StatusFormat
+		}
+		config.InitialLists = append(config.InitialLists, ListContent{ID: id, Format: format, Body: string(body)})
+	}
+	h, err := Create(config)
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = h.Destroy() })
-	body := tokensJSON(benchTokens)
-	id, err := h.Stage(body)
-	if err != nil {
+	if _, err = h.LoadStored(Bootstrap{}); err != nil {
 		b.Fatal(err)
 	}
-	if _, err := h.Commit(id); err != nil {
-		b.Fatal(err)
+	all, err := h.GetAll(0, 0)
+	if err != nil || all.Total != 8404 {
+		b.Fatal(all.Total, err)
 	}
-	return h, body
+	return h
 }
 
-func buildMirror(b testing.TB, h *Handle) map[string]*benchToken {
-	raw, err := h.GetAll()
-	if err != nil {
-		b.Fatal(err)
-	}
-	var toks []*benchToken
-	if err := json.Unmarshal(raw, &toks); err != nil {
-		b.Fatal(err)
-	}
-	m := make(map[string]*benchToken, len(toks))
-	for _, t := range toks {
-		m[fmt.Sprintf("%d-%s", t.ChainID, strings.ToLower(t.Address))] = t
-	}
-	return m
-}
-
-func BenchmarkLookupCgo(b *testing.B) {
-	h, _ := benchHandle(b)
-	key := fmt.Sprintf("%d-0x%040x", 1+100%5, 101)
+func BenchmarkLookup(b *testing.B) {
+	h := benchmarkCatalogue(b)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := h.GetByKey(key); err != nil {
+		if _, err := h.GetNative(1); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
-
-func BenchmarkLookupCgoParallel(b *testing.B) {
-	h, _ := benchHandle(b)
-	key := fmt.Sprintf("%d-0x%040x", 1+100%5, 101)
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			if _, err := h.GetByKey(key); err != nil {
-				b.Error(err)
-				return
-			}
-		}
-	})
-}
-
-func BenchmarkLookupMirror(b *testing.B) {
-	h, _ := benchHandle(b)
-	m := buildMirror(b, h)
-	key := fmt.Sprintf("%d-0x%040x", 1+100%5, 101)
+func BenchmarkCustomPrepareCommit(b *testing.B) {
+	h := benchmarkCatalogue(b)
+	token := Token{ChainID: 1, Address: "0x0000000000000000000000000000000000000001", Symbol: "ONE", Decimals: 18}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if m[key] == nil {
-			b.Fatal("miss")
-		}
-	}
-}
-
-func BenchmarkGetAllBulk(b *testing.B) {
-	h, body := benchHandle(b)
-	b.SetBytes(int64(len(body)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := h.GetAll(); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkMirrorRebuild(b *testing.B) {
-	h, _ := benchHandle(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = buildMirror(b, h)
-	}
-}
-
-func BenchmarkStageCommit(b *testing.B) {
-	h, body := benchHandle(b)
-	b.SetBytes(int64(len(body)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		id, err := h.Stage(body)
+		m, err := h.CustomValidateUpsert(token)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := h.Commit(id); err != nil {
+		if _, err = h.CustomCommit(m.ID); err != nil {
 			b.Fatal(err)
 		}
 	}
