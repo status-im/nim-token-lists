@@ -32,6 +32,10 @@ corrupt stored initial list falls back to embedded data; failures are reported
 as diagnostics. Invalid remote-only lists are skipped with diagnostics.
 An invalid embedded fallback fails the build without publishing partial state.
 
+Source JSON is decoded once when loading the catalogue. Custom edits and policy
+changes rebuild from cached rows; chain changes re-filter those rows without
+decoding JSON again, including rows on chains that were initially disabled.
+
 Skipped keys affect the unique catalogue, not the retained raw lists.
 Native aliases resolve to a chain's zero-address token unless that alias key
 is skipped. ETH metadata is the default for native tokens; hosts provide
@@ -42,6 +46,9 @@ Pages include the snapshot revision and total matching count; a zero limit
 returns all remaining results. Negative offsets or limits are rejected.
 Key queries preserve request order and repetitions while omitting missing
 tokens. Returned values can be modified without changing the source snapshot.
+Direct catalogue query methods borrow the current snapshot and copy only their
+results. The `snapshot` accessor deliberately copies the whole catalogue for
+callers that need to retain it; it should not be used for each hot lookup.
 
 ## Publication and custom tokens
 
@@ -55,15 +62,27 @@ commit to publish immediately. If persistence fails, the host calls abort.
 Only one custom mutation may be pending. A configuration change supersedes a
 pending mutation, so its later commit cannot publish an obsolete snapshot.
 Default priority still prevents custom tokens from overriding curated tokens.
+Duplicate custom chain/address keys are rejected during initialization, including
+case variants, rather than silently collapsed by a later upsert.
 
 Each publication returns a revision and affected chains and lists, including
 chains whose alias lookup behavior changed. Recent changes are retained in a
 bounded history; an expired cursor requires the host to read a fresh snapshot.
+Change detection compares the unique indexes and raw lists directly, including
+token order and alias behavior. Custom preparation computes the change before
+the persistence handshake, so commit does not repeat the diff.
 
 Catalogue state belongs to its caller, which must synchronize mutations and
 snapshot acquisition. Once acquired, a value snapshot remains valid across
 later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
+
+The C adapter must keep published state behind manually owned pointers and hold
+the read lock through direct queries, rather than taking an owned copy per call.
+Candidate construction and diffing belong outside its exclusive publication
+section; publication must recheck revision/epoch and preserve old-snapshot
+lifetimes until readers finish. This is an integration requirement, not a claim
+that the prototype bindings already expose the catalogue.
 
 ## Parsing and validation
 
