@@ -7,6 +7,7 @@
 
 import std/[unittest, strutils, sequtils]
 import ../../tokenlists/core/[types, keys, validators]
+import ../../tokenlists/core/builder
 import ../../tokenlists/core/parsers/[standard, status, registry]
 
 template fixture(path: static[string]): string =
@@ -154,3 +155,27 @@ suite "Status embedded lists":
         check parsed.list.tokens.anyIt(it.logoUri == "")
       if id == "uniswap":
         check parsed.diagnostics.anyIt(it.error.detail == "BadAddress")
+
+  test "all embedded sources build the golden unique catalogue":
+    let config = CatalogueConfig(chains: @chains, mainListId: "status",
+      initialLists: @[
+        ListContent(id: "status", format: StatusFormat,
+          body: fixture("../../fixtures/embedded/status.json")),
+        ListContent(id: "uniswap", body: fixture("../../fixtures/embedded/uniswap.json")),
+        ListContent(id: "coingecko_ethereum",
+          body: fixture("../../fixtures/embedded/coingecko_ethereum.json")),
+        ListContent(id: "coingecko_arbitrum",
+          body: fixture("../../fixtures/embedded/coingecko_arbitrum.json")),
+        ListContent(id: "coingecko_base", body: fixture("../../fixtures/embedded/coingecko_base.json")),
+        ListContent(id: "coingecko_bsc", body: fixture("../../fixtures/embedded/coingecko_bsc.json")),
+        ListContent(id: "coingecko_linea", body: fixture("../../fixtures/embedded/coingecko_linea.json")),
+        ListContent(id: "coingecko_optimism",
+          body: fixture("../../fixtures/embedded/coingecko_optimism.json"))])
+    let snapshot = buildCatalogue(config).get
+    # Independently counted from embedded JSON: four natives, then contributions
+    # of 611, 812, 2234, 0, 4461, 0, 236 and 46 first-occurrence keys.
+    check snapshot.getAll().get.total == 8404
+    check snapshot.getLists().total == 10
+    check snapshot.getLists().items[1].id == "status"
+    check snapshot.getAll().get.items[0].crossChainId == "eth-native"
+    check buildCatalogue(config).get.getAll().get == snapshot.getAll().get

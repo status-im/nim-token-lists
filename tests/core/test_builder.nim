@@ -53,6 +53,8 @@ suite "catalogue builder and immutable queries":
     check skipped.getByKey("1-" & a).error.code == NotFound
     check skipped.getList("list").get.tokens.len == 1
     check skipped.getNative(1).get.symbol == "ETH"
+    check skipped.getNative(1).get.logoUri ==
+      "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2/logo.png"
 
   test "pagination and key queries are bounded and retain request order":
     let snapshot = buildCatalogue(CatalogueConfig(chains: @[1'u64, 10],
