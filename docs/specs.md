@@ -13,11 +13,13 @@ use C bindings to call the Nim implementation.
 - Native validation of supported document formats.
 - Deterministic catalogue building, immutable query snapshots and revisioned publication.
 - Custom-token prepare, commit and abort operations.
+- Refresh planning, conditional fetch results and transactional publication.
+- Host-driven scheduling and parser/refresh-state fuzz targets.
 - A prototype snapshot, C ABI and cgo wrapper.
 
 The core operates on supplied data without network or filesystem access.
 The catalogue is not yet exposed through the C and Go bindings; those still
-use the isolated prototype in `abi/spike_snapshot.nim`. Refresh planning and
+use the isolated prototype in `abi/spike_snapshot.nim`. Production bindings and
 status-go integration remain to be implemented.
 
 ## Catalogue and queries
@@ -83,6 +85,47 @@ Candidate construction and diffing belong outside its exclusive publication
 section; publication must recheck revision/epoch and preserve old-snapshot
 lifetimes until readers finish. This is an integration requirement, not a claim
 that the prototype bindings already expose the catalogue.
+
+## Refresh planning
+
+The core performs no I/O and reads no clock. Hosts supply nonnegative timestamps
+in seconds, fetch each returned batch, persist all proposed writes atomically,
+and only then commit. A refresh first requests the registry, then its supported
+list sources. Each response batch must contain exactly one result per request;
+missing, duplicate and unexpected IDs are rejected without consuming the round.
+
+Registry errors fall back to the committed or embedded registry. Without a usable
+registry the refresh fails. Newly fetched documents undergo native validation;
+cached list bodies retain the existing permissive parsing contract. Source URLs
+and formats scope conditional ETags. A 304 requires usable matching cached
+content and a sent ETag; a successful response with that same nonempty ETag
+retains the cached body. Configured initial-list formats cannot be changed by a
+registry. Unsupported formats are reported without requesting those sources.
+
+Final reports contain persistence writes, per-source outcomes and an overall
+full, partial, unchanged or failed outcome. Failed sources keep their prior
+content. Sources removed from the registry remain merged and receive orphaned
+diagnostics. Apply builds an unpublished candidate and precomputes its change.
+Commit publishes only after the host's durable write succeeds. Abort leaves
+published content, ETags and last-success time unchanged. A wholly failed run
+releases its plan; a partial run can commit the successful writes. An unchanged
+successful commit updates last-success time without a new snapshot revision.
+
+Only one refresh plan is live. Force replaces it, and plan IDs are never reused.
+Plans expire after a configurable timeout (300 seconds by default). Apply and
+commit recheck host time, catalogue revision and configuration epoch. Chain,
+policy or custom publications therefore supersede old refresh candidates; a
+refresh publication likewise supersedes a prepared custom mutation. Hosts must
+serialize the persist/commit handshake against other mutations so a durable
+write cannot race a superseding publication.
+
+Automatic refresh is disabled initially. Positive refresh and retry-check
+intervals are required; `nextDue` returns an optional absolute host timestamp.
+Failed attempts are throttled by the check interval, successful runs by the
+refresh interval. Force bypasses scheduling but cannot bypass network permission.
+Revoking network permission cancels outstanding refresh work. Service state
+tracks last attempt, last success and outcome, with explicit presence flags so
+timestamp zero remains valid. No core callbacks, timers or signals are emitted.
 
 ## Parsing and validation
 
