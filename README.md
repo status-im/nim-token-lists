@@ -4,14 +4,14 @@ A Nim library for fungible-token lists.
 
 ## Available functionality
 
-- A prototype snapshot with JSON input, token lookup and first-occurrence deduplication.
-- A C ABI exposing the prototype snapshot.
+- Deterministic catalogue building, immutable snapshots and paginated queries.
+- A prototype C ABI exposing a separate toy snapshot.
 - A Go wrapper that calls the library through C bindings.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
 - Standard and Status token-list parsers, including expansion of Status contracts by chain.
 - Registry parsing and native validation of supported list formats.
 
-The new core types and parsers are separate from the prototype snapshot and are not exposed through the bindings yet.
+The catalogue and parsers are not exposed through the prototype bindings yet.
 
 ## Source layout
 

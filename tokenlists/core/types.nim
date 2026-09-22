@@ -65,6 +65,35 @@ type
     maxObjectMembers*: int
     maxStringBytes*: int
 
+  PriorityPolicy* = enum
+    StatusPriority, CustomFirstPriority
+
+  CataloguePolicy* = object
+    priority*: PriorityPolicy
+    skippedKeys*: seq[string]
+    nativeAliases*: seq[TokenIdentity]
+    nativeTokens*: seq[Token]
+
+  ListContent* = object
+    id*: string
+    format*: ListFormat
+    body*: string
+    source*: string
+    fetchedTimestamp*: string
+    failure*: TklError
+
+  CatalogueConfig* = object
+    chains*: seq[uint64]
+    mainListId*: string
+    registryId*: string
+    initialLists*: seq[ListContent]
+    policy*: CataloguePolicy
+
+  Page*[T] = object
+    revision*: uint64
+    total*: int
+    items*: seq[T]
+
 const
   NativeAddress* = "0x0000000000000000000000000000000000000000"
   DefaultParseLimits* = ParseLimits(

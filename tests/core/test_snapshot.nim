@@ -1,5 +1,5 @@
 import std/[unittest, options]
-import ../../tokenlists/core/snapshot
+import ../../abi/spike_snapshot
 
 suite "snapshot":
   test "key is chainId-lowercase address":
