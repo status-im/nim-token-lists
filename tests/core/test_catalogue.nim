@@ -85,3 +85,47 @@ suite "catalogue publication and custom transactions":
     check catalogue.customValidateDelete("1-" & address).error.code == NotFound
     check catalogue.customAbort(999).isErr
     check catalogue.revision == 1
+
+  test "unchanged configuration does not invalidate a pending mutation":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    let mutation = catalogue.customValidateUpsert(custom()).get
+    check catalogue.setChains(@[1'u64]).get.kind == NoChange
+    check catalogue.setPolicy(CataloguePolicy()).get.kind == NoChange
+    check catalogue.epoch == 0
+    check catalogue.customCommit(mutation.id).get.revision == 2
+
+  test "change retention is bounded and signals expired cursors":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    for index in 0 ..< 70:
+      let chains = if index mod 2 == 0: @[10'u64] else: @[1'u64]
+      discard catalogue.setChains(chains).get
+    check catalogue.changesSince(0).error.detail == "ChangeHistoryExpired"
+    check catalogue.changesSince(7).get.items.len == 64
+    check catalogue.changesSince(70).get.items.len == 1
+
+  test "aborting an obsolete proposal cannot clear the next one":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    let first = catalogue.customValidateUpsert(custom()).get
+    check catalogue.customAbort(first.id).isOk
+    let second = catalogue.customValidateUpsert(custom("SECOND")).get
+    check second.id > first.id
+    check catalogue.customAbort(first.id).isErr
+    check catalogue.customCommit(second.id).isOk
+    check catalogue.snapshot.getByKey("1-" & address).get.symbol == "SECOND"
+
+  test "alias-only policy changes invalidate lookup consumers for that chain":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    check catalogue.snapshot.getByKey("1-" & address).isErr
+    let changed = catalogue.setPolicy(CataloguePolicy(nativeAliases:
+      @[TokenIdentity(chainId: 1, address: address)])).get
+    check changed.chains == @[1'u64]
+    check changed.lists.len == 0
+    check catalogue.snapshot.getByKey("1-" & address).get.symbol == "ETH"
+    let skipped = catalogue.setPolicy(CataloguePolicy(nativeAliases:
+      @[TokenIdentity(chainId: 1, address: address)],
+      skippedKeys: @["1-" & address])).get
+    check skipped.chains == @[1'u64]
+    check catalogue.snapshot.getByKey("1-" & address).isErr
+    check catalogue.setPolicy(CataloguePolicy(nativeAliases:
+      @[TokenIdentity(chainId: 1, address: address)])).get.chains == @[1'u64]
+    check catalogue.setPolicy(CataloguePolicy()).get.chains == @[1'u64]

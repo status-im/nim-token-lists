@@ -49,7 +49,9 @@ func revision*(catalogue: Catalogue): uint64 = catalogue.current.revision
 func epoch*(catalogue: Catalogue): uint64 = catalogue.configEpoch
 func snapshot*(catalogue: Catalogue): Snapshot = catalogue.current
 
-func describeChange(before, after: Snapshot, kind: ChangeKind): Change =
+func describeChange(
+    before, after: Snapshot, kind: ChangeKind, aliases: seq[TokenIdentity]
+): Change =
   var
     chains: HashSet[uint64]
     lists: HashSet[string]
@@ -62,6 +64,11 @@ func describeChange(before, after: Snapshot, kind: ChangeKind): Change =
   for chain in chains:
     if before.getByChains([chain]).get.items != after.getByChains([chain]).get.items:
       change.chains.add chain
+  for alias in aliases:
+    if alias.chainId notin change.chains and
+        before.getByChainAddress(alias.chainId, alias.address) !=
+          after.getByChainAddress(alias.chainId, alias.address):
+      change.chains.add alias.chainId
   for id in lists:
     if before.getList(id) != after.getList(id):
       change.lists.add id
@@ -69,8 +76,11 @@ func describeChange(before, after: Snapshot, kind: ChangeKind): Change =
   change.lists.sort()
   change
 
-proc publish(catalogue: var Catalogue, next: sink Snapshot, kind: ChangeKind): Change =
-  let change = describeChange(catalogue.current, next, kind)
+proc publish(
+    catalogue: var Catalogue, next: sink Snapshot, kind: ChangeKind,
+    aliases: seq[TokenIdentity] = @[]
+): Change =
+  let change = describeChange(catalogue.current, next, kind, aliases)
   catalogue.current = next
   if catalogue.history.len == ChangeHistoryLimit:
     catalogue.history.delete(0)
@@ -112,9 +122,10 @@ proc reconfigure(
     return err(tklError(Internal, "EpochExhausted"))
   let next = ?buildCatalogue(config, catalogue.stored, catalogue.customs,
     ?catalogue.nextRevision(), catalogue.limits)
+  let aliases = catalogue.config.policy.nativeAliases & config.policy.nativeAliases
   catalogue.config = config
   inc catalogue.configEpoch
-  ok(catalogue.publish(next, kind))
+  ok(catalogue.publish(next, kind, aliases))
 
 proc setChains*(
     catalogue: var Catalogue, chains: seq[uint64]

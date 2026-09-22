@@ -5,6 +5,10 @@ import ./[types, keys, snapshot]
 import ./parsers/[standard, status]
 export types, snapshot
 
+const DefaultNativeLogo =
+  "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/" &
+  "ethereum/assets/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2/logo.png"
+
 proc parseContent(
     content: ListContent, chains: seq[uint64], limits: ParseLimits
 ): Result[ParsedList, TklError] =
@@ -58,7 +62,7 @@ proc buildCatalogue*(
   for chain in config.chains:
     var token = descriptors.getOrDefault(chain, Token(chainId: chain,
       address: NativeAddress, symbol: "ETH", name: "Ethereum",
-      crossChainId: "eth-native", decimals: 18))
+      crossChainId: "eth-native", decimals: 18, logoUri: DefaultNativeLogo))
     token.address = NativeAddress
     token.custom = false
     nativeList.tokens.add token
