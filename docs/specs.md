@@ -15,12 +15,12 @@ use C bindings to call the Nim implementation.
 - Custom-token prepare, commit and abort operations.
 - Refresh planning, conditional fetch results and transactional publication.
 - Host-driven scheduling and parser/refresh-state fuzz targets.
-- A prototype snapshot, C ABI and cgo wrapper.
+- A production C ABI, typed cgo wrapper and public Nim API.
 
 The core operates on supplied data without network or filesystem access.
-The catalogue is not yet exposed through the C and Go bindings; those still
-use the isolated prototype in `abi/spike_snapshot.nim`. Production bindings and
-status-go integration remain to be implemented.
+The catalogue is exposed through C and Go bindings. The old toy snapshot remains
+only as a standalone test fixture and is not linked into the production library.
+The status-go facade and desktop integration remain to be implemented.
 
 ## Catalogue and queries
 
@@ -79,12 +79,55 @@ snapshot acquisition. Once acquired, a value snapshot remains valid across
 later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
-The C adapter must keep published state behind manually owned pointers and hold
-the read lock through direct queries, rather than taking an owned copy per call.
-Candidate construction and diffing belong outside its exclusive publication
-section; publication must recheck revision/epoch and preserve old-snapshot
-lifetimes until readers finish. This is an integration requirement, not a claim
-that the prototype bindings already expose the catalogue.
+The C adapter keeps published snapshots behind manually owned pointers and holds
+the read lock through queries and result encoding. A separate writer mutex
+serializes core mutation, construction, diffing and candidate ownership. The
+write lock only swaps the published pointer and revision; old state is reclaimed
+after previous readers finish. Core commit checks enforce revision/epoch validity.
+
+## C and Go bindings
+
+ABI major 2 replaces the prototype. `tkl_create` accepts an ABI version and a JSON
+object containing `config` and optional `limits`; mismatched versions fail before
+creating a handle. `tkl_load_stored` accepts `contents`, `customs` and `state` and
+publishes revision one. It can succeed only once per handle. Queries before load
+return `InvalidArgument` with `NotLoaded`. Library version is `0.2.0`.
+
+Every operation other than version, revision, destruction and buffer release
+uses a length-delimited UTF-8 JSON object and a `TklBuf` output. C callers free
+every output, including error details, through `tkl_buf_free`. No input pointer
+is retained. Output buffers are not NUL terminated. Nonzero return codes can
+carry `{code, detail, sourceId}`; early argument/handle failures may have no body.
+Go copies and releases each output before decoding and supports `errors.Is`
+against status codes. Enum strings use their declared Nim names, for example
+`StandardFormat`, `StorageFailure`, `RefreshChange`, `NeedMore` and `Full`.
+
+| Operations | Request fields | Result |
+| --- | --- | --- |
+| `get_by_key`, `get_by_chain_address`, `get_native` | `key`; `chainId,address`; `chainId` | Token page with one item |
+| `get_by_keys`, `get_by_chains`, `get_all` | `keys`; `chains,offset,limit`; `offset,limit` | Token page |
+| `get_list`, `get_lists`, `get_diagnostics` | `id`; empty object; empty object | List or diagnostic page |
+| `set_chains`, `set_policy` | `chains`; `policy` | Change |
+| `custom_validate_upsert`, `custom_validate_delete` | `token`; `key` | Mutation |
+| `custom_commit`, `custom_abort` | `mutationId` | Change; true |
+| `refresh_plan`, `refresh_apply` | `now,force`; `planId,results,now` | Plan; report |
+| `refresh_commit`, `refresh_abort` | `planId,now`; `planId,reason` | Change; true |
+| `set_auto_refresh`, `set_network_allowed` | `enabled,refreshSec,checkSec`; `allowed` | true |
+| `next_due`, `refresh_state`, `changes_since` | `now`; empty object; `revision` | Nullable timestamp; state; change page |
+
+Operation names in the header have the `tkl_` prefix. Omitted fields use their
+zero/default values; invalid keys, intervals, transaction IDs and pagination are
+rejected by the core. Queries expose empty tag metadata as an empty JSON object.
+The create envelope is capped at 16 MiB; subsequent envelopes use the instance
+byte limit. Embedded document strings may occupy that envelope budget; original
+document limits, including leaf-string limits, are enforced when parsing them.
+
+Handles use a bounded registry with generation counters. Destruction rejects new
+calls, waits for in-flight calls and frees state; stale generations are invalid.
+Calls can originate on arbitrary host threads under ORC/useMalloc. No callbacks
+or library-created worker threads are used. Hosts still serialize durable writes
+and commit against other mutations; per-call locking cannot cover a host database
+transaction. The exported symbol allowlists contain only `tkl_` symbols.
 
 ## Refresh planning
 
