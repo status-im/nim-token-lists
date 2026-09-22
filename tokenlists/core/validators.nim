@@ -1,6 +1,6 @@
 {.push raises: [], gcsafe.}
 
-import std/[sets, strutils, unicode, uri]
+import std/[sets, strutils, uri]
 import ./[types, errors, keys, jsoncodec]
 import ./parsers/[common, registry]
 export types, errors
@@ -105,25 +105,6 @@ func validTimestamp(value: string): bool =
   parseChainId(value[index + 1 .. index + 2]).get <= 23 and
     parseChainId(value[index + 4 .. index + 5]).get <= 59
 
-func wordText(value: string, maximum: int): bool =
-  if value.len == 0 or value.len > maximum:
-    return false
-  for ch in value:
-    if ch notin Letters + Digits + {'_', ' '}:
-      return false
-  true
-
-func validTokenText(name, symbol: string, decimals: uint64): bool =
-  if decimals > 255 or name.runeLen > 60 or symbol.runeLen > 20:
-    return false
-  for rune in symbol.runes:
-    if rune.isWhiteSpace:
-      return false
-  for ch in name:
-    if ch < ' ' or ch == '\x7f':
-      return false
-  true
-
 proc strictDecode[T](
     data: string, kind: typedesc[T], limits: ParseLimits, sourceId: string
 ): Result[T, TklError] =
@@ -136,8 +117,8 @@ proc validateDocument*(
     data: string, format: ListFormat, sourceId = "",
     limits = DefaultParseLimits
 ): Result[void, TklError] =
-  ## Native core-field contract, not a remote/general JSON Schema interpreter.
-  ## Unknown extensions remain allowed and subject to the same resource limits.
+  ## Required fields and types, not a remote/general JSON Schema interpreter.
+  ## Parsers filter individual rows; one unusable token must not reject a list.
   discard ?decodeDocument(data, JsonString, limits, sourceId)
   template invalid(detail: string): untyped =
     return err(tklError(InvalidContent, detail, sourceId))
@@ -156,43 +137,18 @@ proc validateDocument*(
     return ok()
 
   let list = ?strictDecode(data, RequiredList, limits, sourceId)
-  if not wordText(list.name, 30) or not validTimestamp(list.timestamp):
+  if not validTimestamp(list.timestamp):
     invalid("BadListMetadata")
-  if list.logoURI.isSome and not validUri(list.logoURI.get):
+  if list.logoURI.isSome and list.logoURI.get.len > 0 and
+      not validUri(list.logoURI.get):
     invalid("BadLogoUri")
-  if list.keywords.isSome:
-    if list.keywords.get.len > 20:
-      invalid("TooManyKeywords")
-    var seen: HashSet[string]
-    for keyword in list.keywords.get:
-      if not wordText(keyword, 20) or keyword in seen:
-        invalid("BadKeyword")
-      seen.incl keyword
   if list.tags.isSome:
     let tags = ?decodeDocument(string(list.tags.get), JsonString, limits, sourceId)
     if string(tags).len == 0 or string(tags)[0] != '{':
       invalid("BadTags")
-  if format == StandardFormat and (list.tokens.len == 0 or list.tokens.len > 10_000):
-    invalid("TokenCountOutOfRange")
   for raw in list.tokens:
     if format == StandardFormat:
-      let row = ?strictDecode(string(raw), RequiredStandardRow, limits, sourceId)
-      if row.chainId == 0 or normalizeAddress(row.address).isErr or
-          row.address.len != 42:
-        invalid("BadTokenIdentity")
-      if not validTokenText(row.name, row.symbol, row.decimals):
-        invalid("BadTokenFields")
-      if row.logoURI.isSome and not validUri(row.logoURI.get):
-        invalid("BadLogoUri")
+      discard ?strictDecode(string(raw), RequiredStandardRow, limits, sourceId)
     else:
-      let row = ?strictDecode(string(raw), RequiredStatusRow, limits, sourceId)
-      if not validTokenText(row.name, row.symbol, row.decimals):
-        invalid("BadTokenFields")
-      if row.logoURI.isSome and not validUri(row.logoURI.get):
-        invalid("BadLogoUri")
-      if seq[Contract](row.contracts).len == 0:
-        invalid("EmptyContracts")
-      for contract in seq[Contract](row.contracts):
-        if contract.chainId == 0 or normalizeAddress(contract.address).isErr:
-          invalid("BadTokenIdentity")
+      discard ?strictDecode(string(raw), RequiredStatusRow, limits, sourceId)
   ok()

@@ -40,6 +40,27 @@ proc readValue*(
     reader.raiseUnexpectedValue("IntegerOverflow")
   value = parsed.get
 
+proc readValue*(
+    reader: var JsonReader, value: var int64
+) {.raises: [IOError, SerializationError].} =
+  # Versions are signed SDK metadata, but still require integer JSON syntax.
+  let number = reader.parseNumber(string)
+  if number.fraction.len > 0 or number.exponent.len > 0:
+    reader.raiseUnexpectedValue("SignedIntegerRequired")
+  let parsed = parseChainId(number.integer)
+  if parsed.isErr:
+    reader.raiseUnexpectedValue("IntegerOverflow")
+  let
+    magnitude = parsed.get
+    negative = number.sign == JsonSign.Neg
+    maximum = uint64(high(int64)) + uint64(ord(negative))
+  if magnitude > maximum:
+    reader.raiseUnexpectedValue("IntegerOverflow")
+  value =
+    if negative and magnitude == uint64(high(int64)) + 1: low(int64)
+    elif negative: -int64(magnitude)
+    else: int64(magnitude)
+
 proc decodeDocument*[T](
     data: string, kind: typedesc[T],
     limits: ParseLimits = DefaultParseLimits, sourceId = "", requireFields = false
