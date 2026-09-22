@@ -244,3 +244,51 @@ suite "refresh transactions":
           format: RegistryFormat)]).get
       check catalogue.refreshPlan(10, force = true).get.requests[0].etag ==
         (if sameUrl: "r1" else: "")
+
+  test "registry-only writes advance durable state without publishing":
+    var catalogue = fresh()
+    catalogue.complete()
+    let revision = catalogue.revision
+    let plan = catalogue.refreshPlan(20, force = true).get
+    discard catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "registry", status: 200, body: RegistryBody, etag: "r2")], 21).get
+    let report = catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "main", status: 304)], 22).get
+    check report.writes.len == 1
+    check report.writes[0].id == "registry"
+    check catalogue.refreshCommit(plan.id, 23).get.kind == NoChange
+    check catalogue.revision == revision
+    check catalogue.changesSince(revision).get.items.len == 0
+    check catalogue.refreshState.lastSuccess == 23
+    check catalogue.refreshPlan(30, force = true).get.requests[0].etag == "r2"
+
+  test "fetch metadata is RFC3339 UTC including calendar boundaries":
+    for (now, expected) in [(0'i64, "1970-01-01T00:00:00Z"),
+        (951782400'i64, "2000-02-29T00:00:00Z"),
+        (253402300799'i64, "9999-12-31T23:59:59Z")]:
+      var catalogue = fresh()
+      let plan = catalogue.refreshPlan(now, force = true).get
+      discard catalogue.refreshApply(plan.id, @[registryResult()], now).get
+      let report = catalogue.refreshApply(plan.id,
+        @[FetchResult(id: "main", status: 200, body: ListBody)], now).get
+      for content in report.writes:
+        check content.fetchedAt == now
+        check content.fetchedTimestamp == expected
+      discard catalogue.refreshCommit(plan.id, now).get
+      check catalogue.getList("main").get.fetchedTimestamp == expected
+    var catalogue = fresh()
+    check catalogue.refreshPlan(253402300800'i64, force = true).isErr
+
+  test "apply and commit cannot move host time backwards":
+    var catalogue = fresh()
+    let plan = catalogue.refreshPlan(10, force = true).get
+    discard catalogue.refreshApply(plan.id, @[registryResult()], 50).get
+    let response = @[FetchResult(id: "main", status: 200, body: ListBody)]
+    check catalogue.refreshApply(plan.id, response, 49).error.detail == "TimeBeforePlan"
+    discard catalogue.refreshApply(plan.id, response, 60).get
+    check catalogue.refreshCommit(plan.id, 11).error.detail == "TimeBeforePlan"
+    check catalogue.refreshCommit(plan.id, 59).error.detail == "TimeBeforePlan"
+    check catalogue.revision == 1
+    check catalogue.refreshState.lastSuccess == 0
+    check catalogue.refreshCommit(plan.id, 60).isOk
+    check catalogue.refreshState.lastSuccess == 60
