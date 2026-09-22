@@ -80,12 +80,16 @@ type
     body*: string
     source*: string
     fetchedTimestamp*: string
+    etag*: string
+    fetchedAt*: int64
     failure*: TklError
 
   CatalogueConfig* = object
     chains*: seq[uint64]
     mainListId*: string
     registryId*: string
+    registryUrl*: string
+    embeddedRegistry*: string
     initialLists*: seq[ListContent]
     policy*: CataloguePolicy
 
