@@ -1,11 +1,12 @@
 {.push raises: [], gcsafe.}
 
-import ./[builder, keys]
-export builder
+import ./[builder, keys, planner]
+export builder, planner
 
 type
   ChangeKind* = enum
-    BootstrapChange, CustomChange, ChainsChange, PolicyChange, NoChange
+    BootstrapChange, CustomChange, ChainsChange, PolicyChange, NoChange,
+    RefreshChange
 
   Change* = object
     revision*: uint64
@@ -41,6 +42,14 @@ type
     nextMutation: uint64
     pending: PendingCustom
     history: seq[Change]
+    planner: Planner
+    limits: ParseLimits
+    refreshId: uint64
+    refreshSnapshot: Snapshot
+    refreshParsed: ParsedCatalogue
+    refreshChange: Change
+    refreshDiagnostics: seq[TklError]
+    diagnostics: seq[TklError]
 
 const ChangeHistoryLimit = 64
 
@@ -104,12 +113,14 @@ proc publish(
 
 proc initCatalogue*(
     config: CatalogueConfig, stored: seq[ListContent] = @[],
-    customs: seq[Token] = @[], limits = DefaultParseLimits
+    customs: seq[Token] = @[], limits = DefaultParseLimits,
+    refreshState = RefreshState(), planTimeoutSec = 300'i64
 ): Result[Catalogue, TklError] =
   let parsed = ?parseCatalogueSources(config, stored, limits)
   let snapshot = ?buildFromParsed(parsed, config.chains, config.policy, customs, 1)
   var catalogue = Catalogue(config: config, parsed: parsed,
-    customs: customs, nextMutation: 1)
+    customs: customs, nextMutation: 1, limits: limits,
+    planner: ?initPlanner(config, stored, limits, refreshState, planTimeoutSec))
   let change = describeChange(catalogue.current, snapshot, BootstrapChange)
   discard catalogue.publish(snapshot, change)
   ok(catalogue)
@@ -139,7 +150,7 @@ proc reconfigure(
   if catalogue.configEpoch == high(uint64):
     return err(tklError(Internal, "EpochExhausted"))
   let next = ?buildFromParsed(catalogue.parsed, config.chains, config.policy,
-    catalogue.customs, ?catalogue.nextRevision())
+    catalogue.customs, ?catalogue.nextRevision(), catalogue.diagnostics)
   let change = describeChange(catalogue.current, next, kind)
   catalogue.config = config
   inc catalogue.configEpoch
@@ -185,7 +196,7 @@ proc prepare(
   if mutation.kind == UpsertCustom and not found:
     customs.add mutation.token
   let next = ?buildFromParsed(catalogue.parsed, catalogue.config.chains,
-    catalogue.config.policy, customs, ?catalogue.nextRevision())
+    catalogue.config.policy, customs, ?catalogue.nextRevision(), catalogue.diagnostics)
   let change = describeChange(catalogue.current, next, CustomChange)
   var proposal = mutation
   proposal.id = catalogue.nextMutation
@@ -230,4 +241,83 @@ proc customAbort*(
   if mutationId == 0 or mutationId != catalogue.pending.mutation.id:
     return err(tklError(InvalidArgument, "UnknownCustomMutation"))
   catalogue.pending = PendingCustom()
+  ok()
+
+func refreshState*(catalogue: Catalogue): RefreshState = catalogue.planner.state
+
+proc clearRefresh(catalogue: var Catalogue) =
+  catalogue.refreshId = 0
+  catalogue.refreshSnapshot = Snapshot()
+  catalogue.refreshParsed = ParsedCatalogue()
+  catalogue.refreshChange = Change()
+  catalogue.refreshDiagnostics = @[]
+
+proc setNetworkAllowed*(catalogue: var Catalogue, allowed: bool) =
+  catalogue.planner.setNetworkAllowed(allowed)
+  if not allowed:
+    catalogue.clearRefresh()
+
+proc setAutoRefresh*(
+    catalogue: var Catalogue, enabled: bool, refreshSec, checkSec: int64
+): Result[void, TklError] =
+  catalogue.planner.setAutoRefresh(enabled, refreshSec, checkSec)
+
+func nextDue*(catalogue: Catalogue, now: int64): Result[Opt[int64], TklError] =
+  catalogue.planner.nextDue(now)
+
+proc refreshPlan*(
+    catalogue: var Catalogue, now: int64, force = false
+): Result[RefreshPlan, TklError] =
+  let plan = ?catalogue.planner.startPlan(now, catalogue.revision,
+    catalogue.epoch, force)
+  catalogue.clearRefresh()
+  ok(plan)
+
+proc refreshApply*(
+    catalogue: var Catalogue, planId: uint64, responses: seq[FetchResult], now: int64
+): Result[RefreshReport, TklError] =
+  let report = ?catalogue.planner.applyResults(planId, responses, now,
+    catalogue.revision, catalogue.epoch)
+  if report.step == RefreshStep.Ready:
+    let parsed = parseCatalogueSources(catalogue.config,
+      catalogue.planner.preparedContents, catalogue.limits)
+    if parsed.isErr:
+      discard catalogue.planner.abortPlan(planId, Aborted)
+      return err(parsed.error)
+    let next = buildFromParsed(parsed.get, catalogue.config.chains,
+      catalogue.config.policy, catalogue.customs, ?catalogue.nextRevision(),
+      report.diagnostics)
+    if next.isErr:
+      discard catalogue.planner.abortPlan(planId, Aborted)
+      return err(next.error)
+    catalogue.refreshId = planId
+    catalogue.refreshParsed = parsed.get
+    catalogue.refreshSnapshot = next.get
+    catalogue.refreshChange = describeChange(catalogue.current, next.get, RefreshChange)
+    catalogue.refreshDiagnostics = report.diagnostics
+  ok(report)
+
+proc refreshCommit*(
+    catalogue: var Catalogue, planId: uint64, now: int64
+): Result[Change, TklError] =
+  ?catalogue.planner.checkPlan(planId, now, catalogue.revision, catalogue.epoch)
+  if catalogue.refreshId != planId:
+    return err(tklError(InvalidArgument, "RefreshNotPrepared"))
+  let changed = catalogue.planner.hasWrites or
+    catalogue.refreshChange.chains.len > 0 or catalogue.refreshChange.lists.len > 0 or
+    catalogue.refreshDiagnostics != catalogue.diagnostics
+  ?catalogue.planner.commitPlan(planId, now, catalogue.revision, catalogue.epoch)
+  catalogue.parsed = move(catalogue.refreshParsed)
+  catalogue.diagnostics = move(catalogue.refreshDiagnostics)
+  let change = if changed:
+      catalogue.publish(move(catalogue.refreshSnapshot), catalogue.refreshChange)
+    else: Change(revision: catalogue.revision, kind: NoChange)
+  catalogue.clearRefresh()
+  ok(change)
+
+proc refreshAbort*(
+    catalogue: var Catalogue, planId: uint64, reason = Aborted
+): Result[void, TklError] =
+  ?catalogue.planner.abortPlan(planId, reason)
+  catalogue.clearRefresh()
   ok()

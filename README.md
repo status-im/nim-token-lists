@@ -11,6 +11,8 @@ A Nim library for fungible-token lists.
 - Standard and Status token-list parsers, including expansion of Status contracts by chain.
 - Registry parsing and native validation of supported list formats.
 - Revisioned publication, chain/policy rebuilds and custom-token prepare/commit/abort.
+- Two-round refresh planning, conditional fetch results, transactional publication
+  and host-driven scheduling.
 
 The catalogue and parsers are not exposed through the prototype bindings yet.
 
@@ -44,6 +46,15 @@ Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
 Run `make bench-catalogue` to measure custom updates, owned snapshot copies and
 direct lookups using all eight embedded lists in a release build.
+Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser and
+refresh-state fuzz campaigns under AddressSanitizer. For longer campaigns, run
+`bash scripts/fuzz_core.sh parsers -runs=100000` (or use `planner`).
+If Clang lacks the runtime, set `FUZZER_LIB` to a separately built libFuzzer archive.
+
+The core performs no HTTP or storage operations. A host fetches the requests
+returned by `refreshPlan` and `refreshApply`, persists the final writes in one
+transaction, then calls `refreshCommit`. On persistence failure it calls
+`refreshAbort`; queries continue to return the previously committed catalogue.
 
 Symbol-isolation tooling and coexistence probes are included for embedding the library alongside other Nim libraries.
 Run `make audit` to check the exported-symbol contract.

@@ -104,7 +104,8 @@ func validateCustomKeys(customs: seq[Token]): Result[void, TklError] =
 
 proc buildFromParsed*(
     parsed: ParsedCatalogue, chains: seq[uint64],
-    policy = CataloguePolicy(), customs: seq[Token] = @[], revision = 1'u64
+    policy = CataloguePolicy(), customs: seq[Token] = @[], revision = 1'u64,
+    extraDiagnostics: seq[TklError] = @[]
 ): Result[Snapshot, TklError] =
   ?validateCustomKeys(customs)
   var seen: HashSet[uint64]
@@ -128,7 +129,7 @@ proc buildFromParsed*(
     token.custom = false
     nativeList.tokens.add token
   var lists = @[nativeList]
-  var diagnostics: seq[TklError]
+  var diagnostics = extraDiagnostics
   var customList = TokenList(id: "custom", name: "Custom tokens")
   for token in customs:
     let valid = validateCustom(token, chains)

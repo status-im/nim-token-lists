@@ -32,3 +32,13 @@ jobs:
       - run: make test-go NIM=nim
       - if: runner.os != 'Windows'
         run: make audit NIM=nim
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.10'
+      - run: make fuzz-core NIM=nim
