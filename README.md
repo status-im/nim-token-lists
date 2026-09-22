@@ -46,3 +46,5 @@ Symbol-isolation tooling and coexistence probes are included for embedding the l
 Run `make audit` to check the exported-symbol contract.
 
 C tests cover buffer lengths and ABI argument handling.
+
+See [specs.md](docs/specs.md) for the library behavior and integration scope.
