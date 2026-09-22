@@ -1,149 +1,191 @@
 package tkl
 
 import (
-	"bytes"
 	"errors"
-	"fmt"
 	"testing"
 )
 
-const twoTokens = `[
- {"chainId":1,"address":"0xAbCdEf0000000000000000000000000000000001","symbol":"AAA","decimals":18},
- {"chainId":10,"address":"0x0000000000000000000000000000000000000000","symbol":"ETH","decimals":18}]`
-
 func mustCreate(t testing.TB) *Handle {
 	t.Helper()
-	h, err := Create()
+	h, err := Create(Config{Chains: []uint64{1, 10}})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Destroy() })
+	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+		t.Fatal(err)
+	}
 	return h
 }
-
-func TestABIVersion(t *testing.T) {
-	if got := ABIVersion(); got != 1 {
-		t.Fatalf("ABIVersion = %d, want 1", got)
+func TestVersionAndErrors(t *testing.T) {
+	if ABIVersion() != 2 {
+		t.Fatal(ABIVersion())
 	}
-}
-
-func TestStageCommitLookup(t *testing.T) {
+	if version, err := LibraryVersion(); err != nil || version != "0.2.0" {
+		t.Fatal(version, err)
+	}
 	h := mustCreate(t)
-	id, err := h.Stage([]byte(twoTokens))
-	if err != nil {
+	if _, err := h.LoadStored(Bootstrap{}); !errors.Is(err, Busy) {
 		t.Fatal(err)
 	}
-	if _, err := h.GetByKey("10-0x0000000000000000000000000000000000000000"); !errors.Is(err, NotFound) {
-		t.Fatalf("staged data must be invisible before commit, got %v", err)
-	}
-	rev, err := h.Commit(id)
-	if err != nil || rev != 1 {
-		t.Fatalf("Commit = (%d, %v), want (1, nil)", rev, err)
-	}
-	got, err := h.GetByKey("1-0xABCDEF0000000000000000000000000000000001")
-	if err != nil {
+	if _, err := h.GetByKey("broken"); !errors.Is(err, InvalidArgument) {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(got, []byte(`"symbol":"AAA"`)) {
-		t.Fatalf("unexpected token json: %s", got)
-	}
-	all, err := h.GetAll()
-	if err != nil || !bytes.HasPrefix(all, []byte("[")) {
-		t.Fatalf("GetAll = (%s, %v)", all, err)
-	}
-}
-
-func TestTypedErrors(t *testing.T) {
-	h := mustCreate(t)
-	if _, err := h.Stage([]byte("nope")); !errors.Is(err, InvalidContent) {
-		t.Fatalf("bad json: got %v, want InvalidContent", err)
-	}
-	if _, err := h.Stage(nil); !errors.Is(err, InvalidArgument) {
-		t.Fatalf("nil input: got %v, want InvalidArgument", err)
-	}
-	if _, err := h.GetByKey("1-0x00000000000000000000000000000000000000ff"); !errors.Is(err, NotFound) {
-		t.Fatalf("missing key: got %v, want NotFound", err)
-	}
-	id, _ := h.Stage([]byte(twoTokens))
-	if _, err := h.Stage([]byte(twoTokens)); !errors.Is(err, Busy) {
-		t.Fatalf("second stage: got %v, want Busy", err)
-	}
-	_ = h.Abort(id)
-}
-
-func TestStaleHandle(t *testing.T) {
-	h, err := Create()
-	if err != nil {
+	if _, err := h.GetAll(-1, 1); !errors.Is(err, InvalidArgument) {
 		t.Fatal(err)
 	}
 	if err := h.Destroy(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := h.GetAll(0, 0); !errors.Is(err, InvalidHandle) {
+		t.Fatal(err)
+	}
 	if err := h.Destroy(); !errors.Is(err, InvalidHandle) {
-		t.Fatalf("double destroy: got %v, want InvalidHandle", err)
-	}
-	if _, err := h.GetAll(); !errors.Is(err, InvalidHandle) {
-		t.Fatalf("use after destroy: got %v, want InvalidHandle", err)
+		t.Fatal(err)
 	}
 }
-
-// --- miniature of the real facade's durable-success ordering (Part A §5.1/§5.3) ---
-
-type contentStore interface{ PutBatch(body []byte) error }
-
-type fakeStore struct {
-	fail bool
-	rows [][]byte
-}
-
-func (s *fakeStore) PutBatch(body []byte) error {
-	if s.fail {
-		return errors.New("disk full")
-	}
-	s.rows = append(s.rows, body)
-	return nil
-}
-
-// applyTokens = stage -> persist -> commit; on persist failure -> abort.
-func applyTokens(h *Handle, st contentStore, body []byte) (uint64, error) {
-	id, err := h.Stage(body)
-	if err != nil {
-		return h.Revision(), err
-	}
-	if err := st.PutBatch(body); err != nil {
-		if aerr := h.Abort(id); aerr != nil {
-			return h.Revision(), fmt.Errorf("persist: %w; abort: %v", err, aerr)
-		}
-		return h.Revision(), fmt.Errorf("persist: %w", err)
-	}
-	return h.Commit(id)
-}
-
-func TestPersistFailureLeavesCatalogueUnchanged(t *testing.T) {
+func TestQueriesPoliciesAndCustomPersistence(t *testing.T) {
 	h := mustCreate(t)
-	st := &fakeStore{}
-	if rev, err := applyTokens(h, st, []byte(twoTokens)); err != nil || rev != 1 {
-		t.Fatalf("first apply = (%d, %v)", rev, err)
+	const address = "0x0000000000000000000000000000000000000001"
+	mutation, err := h.CustomValidateUpsert(Token{ChainID: 1, Address: address, Symbol: "ONE", Decimals: 18})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err = h.CustomAbort(mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if h.Revision() != 1 {
+		t.Fatal("abort published")
+	}
+	mutation, err = h.CustomValidateUpsert(Token{ChainID: 1, Address: address, Symbol: "ONE", Decimals: 18})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.CustomCommit(mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	hit, err := h.GetByChainAddress(1, address)
+	if err != nil || hit.Items[0].Symbol != "ONE" {
+		t.Fatal(hit, err)
+	}
+	page, err := h.GetByKeys([]string{"1-" + address, "1-" + address})
+	if err != nil || page.Total != 2 {
+		t.Fatal(page, err)
+	}
+	page, err = h.GetByChains([]uint64{1}, 1, 1)
+	if err != nil || page.Total != 2 || len(page.Items) != 1 {
+		t.Fatal(page, err)
+	}
+	native, err := h.GetNative(1)
+	if err != nil || native.Items[0].Symbol != "ETH" {
+		t.Fatal(native, err)
+	}
+	lists, err := h.GetLists()
+	if err != nil || lists.Total != 2 {
+		t.Fatal(lists, err)
+	}
+	if _, err = h.GetList("custom"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.GetDiagnostics(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.SetPolicy(Policy{SkippedKeys: []string{"1-" + address}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.GetByKey("1-" + address); !errors.Is(err, NotFound) {
+		t.Fatal(err)
+	}
+	if _, err = h.SetPolicy(Policy{}); err != nil {
+		t.Fatal(err)
+	}
+	mutation, err = h.CustomValidateDelete("1-" + address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.CustomCommit(mutation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.GetByKey("1-" + address); !errors.Is(err, NotFound) {
+		t.Fatal(err)
+	}
+	changes, err := h.ChangesSince(1)
+	if err != nil || len(changes.Items) != 4 {
+		t.Fatal(changes, err)
+	}
+}
 
-	st.fail = true
-	onlyOne := `[{"chainId":1,"address":"0x00000000000000000000000000000000000000aa","symbol":"NEW","decimals":6}]`
-	rev, err := applyTokens(h, st, []byte(onlyOne))
-	if err == nil {
-		t.Fatal("expected persist error")
-	}
-	if rev != 1 || h.Revision() != 1 {
-		t.Fatalf("revision moved to %d after failed persist", h.Revision())
-	}
-	if _, err := h.GetByKey("1-0x00000000000000000000000000000000000000aa"); !errors.Is(err, NotFound) {
-		t.Fatalf("aborted token became visible: %v", err)
-	}
-	if _, err := h.GetByKey("1-0xabcdef0000000000000000000000000000000001"); err != nil {
-		t.Fatalf("previous catalogue lost: %v", err)
-	}
+const registryBody = `{"timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokenLists":[{"id":"main","sourceUrl":"https://example.org/main","schema":"standard"}]}`
+const listBody = `{"name":"List","timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokens":[{"chainId":1,"address":"0x0000000000000000000000000000000000000001","name":"One","symbol":"ONE","decimals":18}]}`
 
-	st.fail = false // recovery: the next apply works, nothing is left staged
-	if rev, err := applyTokens(h, st, []byte(onlyOne)); err != nil || rev != 2 {
-		t.Fatalf("recovery apply = (%d, %v), want (2, nil)", rev, err)
+func TestRefreshPersistenceAndSchedule(t *testing.T) {
+	h, err := Create(Config{Chains: []uint64{1}, RegistryID: "registry", RegistryURL: "https://example.org/registry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.SetAutoRefresh(true, 30, 3); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := h.NextDue(10); err != nil || due == nil || *due != 10 {
+		t.Fatal(due, err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		now := int64(10 + attempt*10)
+		plan, err := h.RefreshPlan(now, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: registryBody, ETag: "r1"}}, now+1)
+		if err != nil || more.Step != "NeedMore" {
+			t.Fatal(more, err)
+		}
+		ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 200, Body: listBody, ETag: "m1"}}, now+2)
+		if err != nil || ready.Step != "Ready" || len(ready.Writes) != 2 {
+			t.Fatal(ready, err)
+		}
+		if h.Revision() != 1 {
+			t.Fatal("apply published")
+		}
+		if attempt == 0 {
+			if _, err = h.RefreshAbort(plan.ID, StorageFailure); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err = h.RefreshCommit(plan.ID, now+3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := h.RefreshState()
+	if err != nil || state.LastSuccess != 23 {
+		t.Fatal(state, err)
+	}
+	if _, err = h.SetNetworkAllowed(false); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := h.NextDue(24); err != nil || due != nil {
+		t.Fatal(due, err)
+	}
+	if _, err = h.RefreshPlan(24, true); !errors.Is(err, Aborted) {
+		t.Fatal(err)
+	}
+}
+func TestLimitsAndInputIsolation(t *testing.T) {
+	limits := Limits{MaxBytes: 64, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	h, err := CreateWithLimits(Config{}, &limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	if _, err = h.call("load_stored", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.GetByKey(string(make([]byte, 100))); !errors.Is(err, InvalidArgument) {
+		t.Fatal(err)
+	}
+	if _, err = CreateWithLimits(Config{}, &Limits{}); !errors.Is(err, InvalidArgument) {
+		t.Fatal(err)
 	}
 }

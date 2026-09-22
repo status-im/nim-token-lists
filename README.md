@@ -5,8 +5,8 @@ A Nim library for fungible-token lists.
 ## Available functionality
 
 - Deterministic catalogue building, immutable snapshots and paginated queries.
-- A prototype C ABI exposing a separate toy snapshot.
-- A Go wrapper that calls the library through C bindings.
+- A versioned C ABI exposing the catalogue and transaction operations.
+- A typed Go wrapper that calls the library through C bindings.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
 - Standard and Status token-list parsers, including expansion of Status contracts by chain.
 - Registry parsing and native validation of supported list formats.
@@ -14,11 +14,13 @@ A Nim library for fungible-token lists.
 - Two-round refresh planning, conditional fetch results, transactional publication
   and host-driven scheduling.
 
-The catalogue and parsers are not exposed through the prototype bindings yet.
+The bindings expose bootstrap, queries, policy, custom-token transactions and
+refresh planning. Hosts own HTTP, storage and the persistence/commit handshake.
 
 ## Source layout
 
 - `tokenlists/core/`: Nim implementation.
+- `tokenlists/api.nim`: public Nim API.
 - `abi/`: C API header and Nim exports.
 - `go/tkl/`: cgo wrapper and Go tests.
 - `tests/`: implementation tests.
@@ -37,9 +39,18 @@ make test-nim
 make test-c
 make test-go
 make test-core
+make test-differential
+make test-asan
 ```
 
-Go tests cover concurrent access and handle destruction.
+Go tests cover concurrent access and handle destruction. The separate differential
+test module compares results against pinned SDK parsers; the production Go module
+has no SDK dependency. AddressSanitizer tests require Clang.
+
+Create a handle with `tkl.Create(config)`, then call `LoadStored` once to publish
+the initial catalogue. Queries return typed pages containing a revision, total
+count and items. Call `Destroy` before closing the host's storage. ABI version 2
+replaces the earlier prototype interface; headers and bindings must match.
 
 Run `make bench` for Go binding benchmarks.
 Run `make bench-parse` to measure parsing the embedded

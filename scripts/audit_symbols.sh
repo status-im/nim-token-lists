@@ -16,4 +16,4 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
   diff <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$ACTUAL") || exit 1
   exit 1
 fi
-echo "AUDIT OK: exactly 10 tkl_* globals in $LIB"
+echo "AUDIT OK: exported globals match the tkl_* allowlist in $LIB"
