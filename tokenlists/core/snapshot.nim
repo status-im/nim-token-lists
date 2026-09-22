@@ -1,6 +1,6 @@
 {.push raises: [], gcsafe.}
 
-import std/[tables, sets]
+import std/[algorithm, tables, sets]
 import ./[types, keys]
 export types
 
@@ -106,3 +106,69 @@ func getLists*(snapshot: Snapshot): Page[TokenList] =
 func getDiagnostics*(snapshot: Snapshot): Page[TklError] =
   Page[TklError](revision: snapshot.revisionValue,
     total: snapshot.diagnostics.len, items: snapshot.diagnostics)
+
+type SnapshotDiff* = object
+  chains*: seq[uint64]
+  lists*: seq[string]
+
+func lookupIndex(snapshot: Snapshot, key: string): int =
+  if key in snapshot.skipped:
+    return -1
+  snapshot.byKey.getOrDefault(snapshot.aliases.getOrDefault(key, key), -1)
+
+func lookupDiffers(before, after: Snapshot, key: string): bool =
+  let
+    oldIndex = before.lookupIndex(key)
+    newIndex = after.lookupIndex(key)
+  if oldIndex < 0 or newIndex < 0:
+    return oldIndex != newIndex
+  before.tokens[oldIndex] != after.tokens[newIndex]
+
+func diffSnapshots*(before, after: Snapshot): SnapshotDiff =
+  ## Borrow both immutable values. Compare indexes and raw lists in place;
+  ## no query pages, TokenLists or per-chain token arrays are materialized.
+  var chains: HashSet[uint64]
+  for key, index in before.byKey:
+    let other = after.byKey.getOrDefault(key, -1)
+    if other < 0 or before.tokens[index] != after.tokens[other]:
+      chains.incl before.tokens[index].chainId
+  var priorPositions = newSeq[int](after.tokens.len)
+  for key, index in after.byKey:
+    let other = before.byKey.getOrDefault(key, -1)
+    if other < 0:
+      chains.incl after.tokens[index].chainId
+    else:
+      priorPositions[index] = other + 1
+  # A key/value-only comparison would miss changes to paginated chain order.
+  var lastPosition: Table[uint64, int]
+  for index, token in after.tokens:
+    let previous = priorPositions[index]
+    if previous > 0:
+      if previous < lastPosition.getOrDefault(token.chainId):
+        chains.incl token.chainId
+      lastPosition[token.chainId] = previous
+  for key in before.aliases.keys:
+    if lookupDiffers(before, after, key):
+      chains.incl parseKey(key).get.chainId
+  for key in after.aliases.keys:
+    if key notin before.aliases and lookupDiffers(before, after, key):
+      chains.incl parseKey(key).get.chainId
+  var oldLists, newLists: Table[string, int]
+  for index, list in before.lists:
+    oldLists[list.id] = index
+  for index, list in after.lists:
+    newLists[list.id] = index
+  var changedLists: seq[string]
+  for id, index in oldLists:
+    let other = newLists.getOrDefault(id, -1)
+    if other < 0 or before.lists[index] != after.lists[other]:
+      changedLists.add id
+  for id in newLists.keys:
+    if id notin oldLists:
+      changedLists.add id
+  var changedChains: seq[uint64]
+  for chain in chains:
+    changedChains.add chain
+  changedChains.sort()
+  changedLists.sort()
+  SnapshotDiff(chains: changedChains, lists: changedLists)

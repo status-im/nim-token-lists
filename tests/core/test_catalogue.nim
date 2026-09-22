@@ -1,4 +1,4 @@
-import std/unittest
+import std/[unittest, strutils]
 import ../../tokenlists/core/catalogue
 
 const address = "0x000000000000000000000000000000000000000a"
@@ -6,6 +6,45 @@ func custom(symbol = "CUSTOM"): Token =
   Token(chainId: 1, address: address, name: "Custom", symbol: symbol, decimals: 18)
 
 suite "catalogue publication and custom transactions":
+  test "direct queries match owned snapshot results without exposing state":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64]),
+      customs = @[custom()]).get
+    let held = catalogue.snapshot
+    check catalogue.getByKey("1-" & address) == held.getByKey("1-" & address)
+    check catalogue.getByChainAddress(1, address) == held.getByChainAddress(1, address)
+    check catalogue.getNative(1) == held.getNative(1)
+    check catalogue.getAll() == held.getAll()
+    check catalogue.getByChains([1'u64], 1, 1) == held.getByChains([1'u64], 1, 1)
+    check catalogue.getByKeys(["1-" & address]) == held.getByKeys(["1-" & address])
+    check catalogue.getList("custom") == held.getList("custom")
+    check catalogue.getLists() == held.getLists()
+    check catalogue.getDiagnostics() == held.getDiagnostics()
+    var token = catalogue.getByKey("1-" & address).get
+    token.symbol = "COPY"
+    check catalogue.getByKey("1-" & address).get.symbol == "CUSTOM"
+
+  test "duplicate custom identities are rejected before publication":
+    var duplicate = custom("DUPLICATE")
+    duplicate.address = address.toUpperAscii()
+    let created = initCatalogue(CatalogueConfig(chains: @[1'u64]),
+      customs = @[custom(), duplicate])
+    check created.isErr
+    if created.isErr:
+      check created.error.code == InvalidArgument
+      check created.error.detail == "DuplicateCustomKey"
+
+  test "history cursors at exactly 64 and 65 revisions":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    for index in 0 ..< 63:
+      discard catalogue.setChains(if index mod 2 == 0: @[10'u64] else: @[1'u64]).get
+    check catalogue.revision == 64
+    check catalogue.changesSince(0).get.items.len == 64
+    discard catalogue.setChains(@[1'u64]).get
+    check catalogue.revision == 65
+    check catalogue.changesSince(0).error.detail == "ChangeHistoryExpired"
+    check catalogue.changesSince(1).get.items.len == 64
+    check catalogue.changesSince(high(uint64)).error.code == InvalidArgument
+
   test "bootstrap publishes revision one and abort preserves the snapshot":
     var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
     check catalogue.revision == 1

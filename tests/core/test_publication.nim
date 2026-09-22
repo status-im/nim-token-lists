@@ -34,10 +34,13 @@ proc queryReader(shared: ptr Shared) {.thread.} =
   for index in 0 ..< 1000:
     shared.lock.acquireRead()
     let held = shared.catalogue.snapshot
+    let direct = shared.catalogue.getAll(0, 1).get
     shared.lock.releaseRead()
     let page = held.getAll().get
     let expected = if page.revision mod 2 == 0: 10'u64 else: 1'u64
     if page.items.len != 1 or page.items[0].chainId != expected:
+      discard shared.errors.fetchAdd(1)
+    if direct.revision != page.revision or direct.items != page.items:
       discard shared.errors.fetchAdd(1)
 
 suite "snapshot publication under readers":

@@ -38,6 +38,15 @@ type
     logoURI*: string
     contracts*: Contracts
 
+  SourceRow* = object
+    token*: StandardRow
+    row*: int
+    crossChainId*: string
+
+  ParsedSource* = object
+    list*: TokenList
+    rows*: seq[SourceRow]
+
 proc readValue*(
     reader: var JsonReader, value: var WireTags
 ) {.raises: [IOError, SerializationError].} =
@@ -90,3 +99,9 @@ proc appendRow*(
     symbol: row.symbol, decimals: uint8(row.decimals), logoUri: row.logoURI,
     crossChainId: crossChainId,
   )
+
+proc filterSource*(source: ParsedSource, chains: openArray[uint64]): ParsedList =
+  var parsed = ParsedList(list: source.list)
+  for row in source.rows:
+    parsed.appendRow(row.token, row.row, chains, row.crossChainId)
+  parsed
