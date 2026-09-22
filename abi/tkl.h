@@ -35,6 +35,8 @@ uint32_t tkl_abi_version(void);
 int32_t tkl_lib_version(TklBuf* out);
 /* Config: {"config": CatalogueConfig, "limits"?: ParseLimits}.
    Create's JSON envelope is bounded to 16 MiB. Limits default when omitted.
+   Each initialLists body and embeddedRegistry must fit limits.maxBytes;
+   oversized embedded documents are rejected before allocating a handle.
    A created handle has revision zero; load_stored publishes revision one. */
 int32_t tkl_create(uint32_t abiVer, const char* json, size_t len,
                    uint64_t* outHandle, TklBuf* error);
@@ -42,6 +44,7 @@ int32_t tkl_create(uint32_t abiVer, const char* json, size_t len,
    Repeated destroy returns TKL_INVALID_HANDLE. */
 int32_t tkl_destroy(uint64_t handle);
 /* All operations accept UTF-8 JSON objects and return UTF-8 JSON.
+   Use {} for operations without arguments; zero-length input is invalid.
    Nonzero status may return {code,detail,sourceId}; always free the output.
    Input envelope and nested document limits are applied per instance.
    Queries return {revision,total,items}; limit=0 means all.

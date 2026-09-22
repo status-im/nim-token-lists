@@ -64,3 +64,18 @@ func BenchmarkCustomPrepareCommit(b *testing.B) {
 		}
 	}
 }
+
+// This measures the complete bulk transfer and typed decode needed to refresh
+// a host mirror, using the same eight-list catalogue as the lookup benchmark.
+func BenchmarkGetAllBulk(b *testing.B) {
+	h := benchmarkCatalogue(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		page, err := h.GetAll(0, 0)
+		if err != nil || page.Total != 8404 {
+			b.Fatal(page.Total, err)
+		}
+	}
+	b.ReportMetric(8404, "tokens/op")
+}

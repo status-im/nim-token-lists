@@ -173,16 +173,16 @@ func TestRefreshPersistenceAndSchedule(t *testing.T) {
 	}
 }
 func TestLimitsAndInputIsolation(t *testing.T) {
-	limits := Limits{MaxBytes: 64, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
 	h, err := CreateWithLimits(Config{}, &limits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.call("load_stored", struct{}{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.GetByKey(string(make([]byte, 100))); !errors.Is(err, InvalidArgument) {
+	if _, err = h.GetByKey(string(make([]byte, 200))); !errors.Is(err, InvalidArgument) {
 		t.Fatal(err)
 	}
 	if _, err = CreateWithLimits(Config{}, &Limits{}); !errors.Is(err, InvalidArgument) {
