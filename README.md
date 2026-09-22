@@ -10,6 +10,7 @@ A Nim library for fungible-token lists.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
 - Standard and Status token-list parsers, including expansion of Status contracts by chain.
 - Registry parsing and native validation of supported list formats.
+- Revisioned publication, chain/policy rebuilds and custom-token prepare/commit/abort.
 
 The catalogue and parsers are not exposed through the prototype bindings yet.
 
