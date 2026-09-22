@@ -155,6 +155,11 @@ proc tkl_create(
         limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
         limits.maxStringBytes <= 0:
       return errorBuf(outBuf, tklError(InvalidArgument, "InvalidLimits"))
+    for content in cfg.config.initialLists:
+      if content.body.len > limits.maxBytes:
+        return errorBuf(outBuf, tklError(InvalidArgument, "TooLarge", content.id))
+    if cfg.config.embeddedRegistry.len > limits.maxBytes:
+      return errorBuf(outBuf, tklError(InvalidArgument, "TooLarge", cfg.config.registryId))
     acquire(registryLock)
     defer: release(registryLock)
     for i in 0 ..< MaxHandles:
@@ -212,9 +217,48 @@ func normalizedList(list: sink TokenList): TokenList =
   if string(value.tags).len == 0: value.tags = JsonString("{}")
   value
 
+type
+  QueryHandler = proc(snapshot: Snapshot, request: Request): Result[string, TklError]
+    {.nimcall, raises: [], gcsafe.}
+  WriterHandler = proc(h: ptr HandleObj, request: Request): Result[string, TklError]
+    {.nimcall, raises: [], gcsafe.}
+
+proc encodeResult[T](value: Result[T, TklError]): Result[string, TklError] =
+  let output = ?value
+  ok(Json.encode(output))
+
+proc operate(
+    h: ptr HandleObj, input: string, reader: QueryHandler,
+    writer: WriterHandler, bootstrap: bool
+): Result[string, TklError] =
+  if bootstrap:
+    let request = ?decodeDocument(input, BootstrapRequest, envelopeLimits(h.limits))
+    acquire(h.writer)
+    defer: release(h.writer)
+    if not h.core.isNil:
+      return err(tklError(Busy, "AlreadyLoaded"))
+    let core = ?initCatalogue(h.config, request.contents, request.customs,
+      h.limits, request.state)
+    h.core = own(core)
+    publish(h)
+    return encodeResult(h.core[].changesSince(0))
+  let request = ?decodeDocument(input, Request, envelopeLimits(h.limits))
+  if not reader.isNil:
+    h.rw.acquireRead()
+    defer: h.rw.releaseRead()
+    if h.current.isNil:
+      return err(tklError(InvalidArgument, "NotLoaded"))
+    return reader(h.current[], request)
+  doAssert not writer.isNil
+  acquire(h.writer)
+  defer: release(h.writer)
+  if h.core.isNil:
+    return err(tklError(InvalidArgument, "NotLoaded"))
+  writer(h, request)
+
 proc run(
-    handle: uint64, operation: string, data: cstring, length: csize_t,
-    outBuf: ptr TklBuf
+    handle: uint64, data: cstring, length: csize_t, outBuf: ptr TklBuf,
+    reader: QueryHandler = nil, writer: WriterHandler = nil, bootstrap = false
 ): int32 =
   if outBuf.isNil: return int32(InvalidArgument)
   outBuf[] = TklBuf()
@@ -226,98 +270,101 @@ proc run(
   try:
     let input = readInput(data, length, h.limits.maxBytes)
     if input.isErr: return errorBuf(outBuf, input.error)
-    template checked(expression: untyped): untyped =
-      block:
-        let answer = expression
-        if answer.isErr: return errorBuf(outBuf, answer.error)
-        answer.get
-    template respond(payload: untyped): untyped =
-      block:
-        let output = payload
-        return fillBuf(outBuf, Json.encode(output))
-    if operation == "load_stored":
-      let request = checked(decodeDocument(input.get, BootstrapRequest,
-        envelopeLimits(h.limits)))
-      acquire(h.writer)
-      defer: release(h.writer)
-      if not h.core.isNil:
-        return errorBuf(outBuf, tklError(Busy, "AlreadyLoaded"))
-      let core = checked(initCatalogue(h.config, request.contents, request.customs,
-        h.limits, request.state))
-      h.core = own(core)
-      publish(h)
-      respond(h.core[].changesSince(0).get)
-    let request = checked(decodeDocument(input.get, Request, envelopeLimits(h.limits)))
-    if operation in ["get_by_key", "get_by_chain_address", "get_by_keys",
-        "get_by_chains", "get_all", "get_native", "get_list", "get_lists",
-        "get_diagnostics"]:
-      h.rw.acquireRead()
-      defer: h.rw.releaseRead()
-      if h.current.isNil:
-        return errorBuf(outBuf, tklError(InvalidArgument, "NotLoaded"))
-      case operation
-      of "get_by_key":
-        let item = checked(h.current[].getByKey(request.key))
-        let page = coreTypes.Page[Token](revision: h.current[].revision, total: 1, items: @[item])
-        respond(page)
-      of "get_by_chain_address":
-        let item = checked(h.current[].getByChainAddress(request.chainId, request.address))
-        let page = coreTypes.Page[Token](revision: h.current[].revision, total: 1, items: @[item])
-        respond(page)
-      of "get_native":
-        let item = checked(h.current[].getNative(request.chainId))
-        let page = coreTypes.Page[Token](revision: h.current[].revision, total: 1, items: @[item])
-        respond(page)
-      of "get_by_keys": respond(checked(h.current[].getByKeys(request.keys)))
-      of "get_by_chains":
-        respond(checked(h.current[].getByChains(request.chains, request.offset, request.limit)))
-      of "get_all": respond(checked(h.current[].getAll(request.offset, request.limit)))
-      of "get_list":
-        let item = normalizedList(checked(h.current[].getList(request.id)))
-        let page = coreTypes.Page[TokenList](revision: h.current[].revision, total: 1, items: @[item])
-        respond(page)
-      of "get_lists":
-        var page = h.current[].getLists()
-        for item in page.items.mitems: item = normalizedList(move(item))
-        respond(page)
-      else: respond(h.current[].getDiagnostics())
-    acquire(h.writer)
-    defer: release(h.writer)
-    if h.core.isNil:
-      return errorBuf(outBuf, tklError(InvalidArgument, "NotLoaded"))
-    template change(expression: untyped): untyped =
-      block:
-        let answer = checked(expression)
-        publish(h)
-        respond(answer)
-    case operation
-    of "set_chains": change(h.core[].setChains(request.chains))
-    of "set_policy": change(h.core[].setPolicy(request.policy))
-    of "custom_validate_upsert": respond(checked(h.core[].customValidateUpsert(request.token)))
-    of "custom_validate_delete": respond(checked(h.core[].customValidateDelete(request.key)))
-    of "custom_commit": change(h.core[].customCommit(request.mutationId))
-    of "custom_abort":
-      checked(h.core[].customAbort(request.mutationId))
-      respond(true)
-    of "refresh_plan": respond(checked(h.core[].refreshPlan(request.now, request.force)))
-    of "refresh_apply":
-      respond(checked(h.core[].refreshApply(request.planId, request.results, request.now)))
-    of "refresh_commit": change(h.core[].refreshCommit(request.planId, request.now))
-    of "refresh_abort":
-      checked(h.core[].refreshAbort(request.planId, request.reason))
-      respond(true)
-    of "set_auto_refresh":
-      checked(h.core[].setAutoRefresh(request.enabled, request.refreshSec, request.checkSec))
-      respond(true)
-    of "set_network_allowed":
-      h.core[].setNetworkAllowed(request.allowed)
-      respond(true)
-    of "next_due": respond(checked(h.core[].nextDue(request.now)))
-    of "changes_since": respond(checked(h.core[].changesSince(request.revision)))
-    of "refresh_state": respond(h.core[].refreshState)
-    else: return errorBuf(outBuf, tklError(InvalidArgument, "UnknownOperation"))
+    let output = operate(h, input.get, reader, writer, bootstrap)
+    if output.isErr: return errorBuf(outBuf, output.error)
+    fillBuf(outBuf, output.get)
   except CatchableError:
-    return errorBuf(outBuf, tklError(Internal, "OperationFailed"))
+    errorBuf(outBuf, tklError(Internal, "OperationFailed"))
+
+proc queryByKey(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  let item = ?snapshot.getByKey(request.key)
+  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+
+proc queryByChainAddress(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  let item = ?snapshot.getByChainAddress(request.chainId, request.address)
+  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+
+proc queryNative(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  let item = ?snapshot.getNative(request.chainId)
+  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+
+proc queryByKeys(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  encodeResult(snapshot.getByKeys(request.keys))
+
+proc queryByChains(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  encodeResult(snapshot.getByChains(request.chains, request.offset, request.limit))
+
+proc queryAll(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  encodeResult(snapshot.getAll(request.offset, request.limit))
+
+proc queryList(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  let item = normalizedList(?snapshot.getList(request.id))
+  ok(Json.encode(coreTypes.Page[TokenList](revision: snapshot.revision, total: 1, items: @[item])))
+
+proc queryLists(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  var page = snapshot.getLists()
+  for item in page.items.mitems: item = normalizedList(move(item))
+  ok(Json.encode(page))
+
+proc queryDiagnostics(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  ok(Json.encode(snapshot.getDiagnostics()))
+
+proc updateChains(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  let change = ?h.core[].setChains(request.chains)
+  publish(h)
+  ok(Json.encode(change))
+
+proc updatePolicy(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  let change = ?h.core[].setPolicy(request.policy)
+  publish(h)
+  ok(Json.encode(change))
+
+proc prepareUpsert(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].customValidateUpsert(request.token))
+
+proc prepareDelete(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].customValidateDelete(request.key))
+
+proc commitCustom(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  let change = ?h.core[].customCommit(request.mutationId)
+  publish(h)
+  ok(Json.encode(change))
+
+proc abortCustom(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  ?h.core[].customAbort(request.mutationId)
+  ok(Json.encode(true))
+
+proc planRefresh(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].refreshPlan(request.now, request.force))
+
+proc applyRefresh(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].refreshApply(request.planId, request.results, request.now))
+
+proc commitRefresh(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  let change = ?h.core[].refreshCommit(request.planId, request.now)
+  publish(h)
+  ok(Json.encode(change))
+
+proc abortRefresh(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  ?h.core[].refreshAbort(request.planId, request.reason)
+  ok(Json.encode(true))
+
+proc updateSchedule(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  ?h.core[].setAutoRefresh(request.enabled, request.refreshSec, request.checkSec)
+  ok(Json.encode(true))
+
+proc updateNetwork(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  h.core[].setNetworkAllowed(request.allowed)
+  ok(Json.encode(true))
+
+proc queryNextDue(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].nextDue(request.now))
+
+proc queryChanges(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  encodeResult(h.core[].changesSince(request.revision))
+
+proc queryRefreshState(h: ptr HandleObj, request: Request): Result[string, TklError] =
+  ok(Json.encode(h.core[].refreshState))
 
 proc tkl_revision(handle: uint64): uint64 {.tklExport.} =
   var idx: int
@@ -333,100 +380,100 @@ proc tkl_buf_free(buf: ptr TklBuf) {.tklExport.} =
 
 proc tkl_load_stored(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "load_stored", data, length, outBuf)
+  run(handle, data, length, outBuf, bootstrap = true)
 
 proc tkl_set_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "set_chains", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = updateChains)
 
 proc tkl_set_policy(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "set_policy", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = updatePolicy)
 
 proc tkl_get_by_key(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_by_key", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryByKey)
 
 proc tkl_get_by_chain_address(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_by_chain_address", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryByChainAddress)
 
 proc tkl_get_by_keys(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_by_keys", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryByKeys)
 
 proc tkl_get_by_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_by_chains", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryByChains)
 
 proc tkl_get_all(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_all", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryAll)
 
 proc tkl_get_native(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_native", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryNative)
 
 proc tkl_get_list(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_list", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryList)
 
 proc tkl_get_lists(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_lists", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryLists)
 
 proc tkl_get_diagnostics(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "get_diagnostics", data, length, outBuf)
+  run(handle, data, length, outBuf, reader = queryDiagnostics)
 
 proc tkl_custom_validate_upsert(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "custom_validate_upsert", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = prepareUpsert)
 
 proc tkl_custom_validate_delete(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "custom_validate_delete", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = prepareDelete)
 
 proc tkl_custom_commit(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "custom_commit", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = commitCustom)
 
 proc tkl_custom_abort(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "custom_abort", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = abortCustom)
 
 proc tkl_refresh_plan(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "refresh_plan", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = planRefresh)
 
 proc tkl_refresh_apply(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "refresh_apply", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = applyRefresh)
 
 proc tkl_refresh_commit(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "refresh_commit", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = commitRefresh)
 
 proc tkl_refresh_abort(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "refresh_abort", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = abortRefresh)
 
 proc tkl_set_auto_refresh(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "set_auto_refresh", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = updateSchedule)
 
 proc tkl_set_network_allowed(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "set_network_allowed", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = updateNetwork)
 
 proc tkl_next_due(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "next_due", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = queryNextDue)
 
 proc tkl_changes_since(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "changes_since", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = queryChanges)
 
 proc tkl_refresh_state(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, "refresh_state", data, length, outBuf)
+  run(handle, data, length, outBuf, writer = queryRefreshState)

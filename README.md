@@ -52,7 +52,7 @@ the initial catalogue. Queries return typed pages containing a revision, total
 count and items. Call `Destroy` before closing the host's storage. ABI version 2
 replaces the earlier prototype interface; headers and bindings must match.
 
-Run `make bench` for Go binding benchmarks.
+Run `make bench` for Go binding lookup, bulk-read and custom-write benchmarks.
 Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
 Run `make bench-catalogue` to measure custom updates, owned snapshot copies and

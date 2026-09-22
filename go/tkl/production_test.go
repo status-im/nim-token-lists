@@ -2,6 +2,7 @@ package tkl
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,40 @@ func TestProductionCatalogue(t *testing.T) {
 	token, err := h.GetByKey("1-0x0000000000000000000000000000000000000001")
 	if err != nil || token.Items[0].Symbol != "ONE" {
 		t.Fatalf("lookup: %+v %v", token, err)
+	}
+}
+
+func TestCreateChecksEmbeddedDocumentByteLimits(t *testing.T) {
+	limits := Limits{MaxBytes: 64, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	for _, config := range []Config{
+		{InitialLists: []ListContent{{ID: "large", Body: strings.Repeat(" ", 65)}}},
+		{RegistryID: "registry", EmbeddedRegistry: strings.Repeat(" ", 65)},
+	} {
+		h, err := CreateWithLimits(config, &limits)
+		if h != nil {
+			_ = h.Destroy()
+		}
+		if !errors.Is(err, InvalidArgument) {
+			t.Fatalf("oversized embedded document accepted: %v", err)
+		}
+	}
+	h, err := CreateWithLimits(Config{InitialLists: []ListContent{{ID: "boundary", Body: strings.Repeat(" ", 64)}}}, &limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+}
+
+func TestNoArgumentQueriesSendObjectEnvelopes(t *testing.T) {
+	h := mustCreate(t)
+	if _, err := h.GetLists(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.GetDiagnostics(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RefreshState(); err != nil {
+		t.Fatal(err)
 	}
 }
 
