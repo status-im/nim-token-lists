@@ -20,9 +20,9 @@ type
     custom*: bool
 
   Version* = object
-    major*: uint64
-    minor*: uint64
-    patch*: uint64
+    major*: int64
+    minor*: int64
+    patch*: int64
 
   TokenList* = object
     id*: string

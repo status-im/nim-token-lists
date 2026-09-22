@@ -38,34 +38,50 @@ suite "registry and native validators":
       StatusFormat).get == StandardFormat
     check resolveFormat("https://example.com/schema",
       StandardFormat).error.code == UnsupportedSchema
-    check resolveFormat("{}", StandardFormat).isErr
+    check resolveFormat("{}", StandardFormat).error.code == UnsupportedSchema
+    const registrySchema = staticRead(
+      "../../fixtures/sdk/fetcher/list_of_token_lists_schema.json")
+    check resolveFormat(registrySchema, RegistryFormat).error.code == UnsupportedSchema
 
   test "native standard validation is distinct from permissive parsing":
     check validateDocument(validList, StandardFormat).isOk
     check validateDocument("{}", StandardFormat).error.code == InvalidContent
     check validateDocument("null", StandardFormat).isErr
     check validateDocument(validList.replace("\"decimals\":255", "\"decimals\":256"),
-      StandardFormat).isErr
+      StandardFormat).isOk
     check validateDocument(validList.replace("\"chainId\":1", "\"chainId\":0"),
-      StandardFormat).isErr
-    check validateDocument(validList.replace(address, "bad"), StandardFormat).isErr
+      StandardFormat).isOk
+    check validateDocument(validList.replace(address, "bad"), StandardFormat).isOk
     check validateDocument(validList.replace("\"name\":\"Token\",", ""),
       StandardFormat).isErr
     check validateDocument(validList.replace("2025-01-01", "2025-02-30"),
       StandardFormat).isErr
     check validateDocument(validList.replace("\"minor\":0", "\"minor\":-1"),
-      StandardFormat).isErr
+      StandardFormat).isOk
     check validateDocument(validList.replace("\"major\":1", "\"major\":1e1"),
       StandardFormat).isErr
     check validateDocument("{" & metadata & ""","tokens":[]}""",
-      StandardFormat).isErr
+      StandardFormat).isOk
 
   test "Status shape uses contracts and admits cross-chain grouping":
     let body = "{" & metadata & ""","tokens":[{"name":"X","symbol":"X",
       "decimals":18,"crossChainId":"group","contracts":{"1":"""" & address & """"}}]}"""
     check validateDocument(body, StatusFormat).isOk
     check validateDocument(body, StandardFormat).isErr
-    check validateDocument(body.replace(address, "bad"), StatusFormat).isErr
+    check validateDocument(body.replace(address, "bad"), StatusFormat).isOk
+
+  test "row policy does not reject an otherwise usable list":
+    let body = validList.replace("\"symbol\":\"\"", "\"symbol\":\"YEE\u00a0\"")
+      .replace("\"decimals\":255", "\"decimals\":255,\"logoURI\":\"\"")
+    check validateDocument(body, StandardFormat).isOk
+    check validateDocument(body.replace("\"tokens\":", "\"logoURI\":\"\",\"tokens\":"),
+      StandardFormat).isOk
+    for malformed in [
+      validList.replace("\"decimals\":255", "\"decimals\":\"18\""),
+      validList.replace("\"tokens\":[", "\"tokens\":[null,"),
+      validList.replace("\"symbol\":\"\"", "\"symbol\":[]")
+    ]:
+      check validateDocument(malformed, StandardFormat).isErr
 
   test "registry validates URLs, required metadata and duplicate IDs":
     check validateDocument(validRegistry, RegistryFormat).isOk

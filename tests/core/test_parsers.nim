@@ -1,6 +1,7 @@
 import std/[unittest, strutils]
 import ../../tokenlists/core/[types, errors]
 import ../../tokenlists/core/parsers/[standard, status]
+import ../../tokenlists/core/parsers/registry
 
 const a = "0x000000000000000000000000000000000000000a"
 func row(chain = "1", decimals = "18", address = a, symbol = ""): string =
@@ -9,6 +10,26 @@ func row(chain = "1", decimals = "18", address = a, symbol = ""): string =
 func wrap(rows: string): string = """{"tokens":[""" & rows & "]}"
 
 suite "bounded token parsers":
+  test "version metadata preserves signed SDK integers":
+    for value in ["-9223372036854775808", "-1", "0", "9223372036854775807"]:
+      let body = "{\"version\":{\"major\":" & value &
+        ",\"minor\":" & value & ",\"patch\":" & value & "}}"
+      let parsed = parseStandard(body, [])
+      check parsed.isOk
+      if parsed.isErr:
+        continue
+      let standard = parsed.get.list.version
+      check $standard.major == value
+      check $standard.minor == value
+      check $standard.patch == value
+      check parseStatus(body, []).get.list.version == standard
+      check parseRegistry(body).get.version == standard
+    for value in ["-9223372036854775809", "9223372036854775808", "1e1", "-1e1", "1.0"]:
+      let body = "{\"version\":{\"major\":" & value & "}}"
+      check parseStandard(body, []).isErr
+      check parseStatus(body, []).isErr
+      check parseRegistry(body).isErr
+
   test "standard metadata and document order survive":
     let parsed = parseStandard("""{"name":"Example","timestamp":"2025-01-01T00:00:00Z",
       "version":{"major":1,"minor":2,"patch":3},"tags":{"stable":{"name":"Stable"}},

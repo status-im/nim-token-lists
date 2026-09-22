@@ -109,7 +109,48 @@ suite "ported SDK fixtures":
     let schema = fixture("../../fixtures/sdk/fetcher/list_of_token_lists_wrong_schema.json")
     check resolveFormat(schema, StandardFormat).error.code == UnsupportedSchema
 
-  test "empty list parsing stays compatible even when validation is stricter":
+  test "empty lists are usable documents":
     check parseStandard(listBody("[]"), chains).get.list.tokens.len == 0
     check parseStatus(listBody("[]"), chains).get.list.tokens.len == 0
-    check validateDocument(listBody("[]"), StandardFormat).isErr
+    check validateDocument(listBody("[]"), StandardFormat).isOk
+
+# Embedded fixtures are decoded from status-go ec8aed16562acc50ffda89165e508cc501064fb9,
+# pkg/services/wallet/token/local-token-lists/default-lists/*.go (MPL-2.0).
+# Only the final newline is normalized; see https://mozilla.org/MPL/2.0/.
+suite "Status embedded lists":
+  test "all shipped lists validate and preserve usable rows":
+    const inputs = [
+      ("status", StatusFormat, fixture("../../fixtures/embedded/status.json")),
+      ("uniswap", StandardFormat, fixture("../../fixtures/embedded/uniswap.json")),
+      ("coingecko_ethereum", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_ethereum.json")),
+      ("coingecko_arbitrum", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_arbitrum.json")),
+      ("coingecko_base", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_base.json")),
+      ("coingecko_bsc", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_bsc.json")),
+      ("coingecko_linea", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_linea.json")),
+      ("coingecko_optimism", StandardFormat,
+        fixture("../../fixtures/embedded/coingecko_optimism.json"))
+    ]
+    const supported = [1'u64, 10, 56, 137, 324, 8453, 42161, 43114, 59144]
+    for (id, format, body) in inputs:
+      checkpoint id
+      let validated = validateDocument(body, format, id)
+      if validated.isErr:
+        checkpoint validated.error.detail
+      check validated.isOk
+      let parsed = if format == StatusFormat:
+        parseStatus(body, supported, id).get
+      else:
+        parseStandard(body, supported, id).get
+      check parsed.list.tokens.len > 0
+      if id == "coingecko_ethereum":
+        check parsed.list.tokens.len == 4765
+        check parsed.list.tokens.anyIt(it.symbol == "YEE\u00a0")
+      if id == "status":
+        check parsed.list.tokens.anyIt(it.logoUri == "")
+      if id == "uniswap":
+        check parsed.diagnostics.anyIt(it.error.detail == "BadAddress")
