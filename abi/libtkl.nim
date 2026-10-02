@@ -143,6 +143,9 @@ proc tkl_create(
   if outHandle.isNil or outBuf.isNil: return int32(InvalidArgument)
   if abiVer != TklAbiVersion: return int32(AbiMismatch)
   ensureInit()
+  # ORC retains a thread-local cycle buffer even after all temporary refs die.
+  # Foreign threads have no Nim exit hook; drain it after the try scope unwinds.
+  defer: GC_fullCollect()
   try:
     let input = readInput(data, length, TklMaxInputBytes)
     if input.isErr: return errorBuf(outBuf, input.error)
@@ -180,6 +183,7 @@ proc tkl_create(
 
 proc tkl_destroy(handle: uint64): int32 {.tklExport.} =
   ensureInit()
+  defer: GC_fullCollect()
   let low = handle and 0xFFFF_FFFF'u64
   if handle == 0 or low >= uint64(MaxHandles): return int32(InvalidHandle)
   let i = int(low)
@@ -267,6 +271,8 @@ proc run(
   let rc = enter(handle, idx, h)
   if rc != int32(Ok): return rc
   defer: leave(idx)
+  # Run after request/result destructors, before returning to the host thread.
+  defer: GC_fullCollect()
   try:
     let input = readInput(data, length, h.limits.maxBytes)
     if input.isErr: return errorBuf(outBuf, input.error)

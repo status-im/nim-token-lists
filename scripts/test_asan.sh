@@ -8,3 +8,5 @@ for test in smoke lengths; do
     -o "build/asan/$test" "tests/abi/$test.c" -Iabi build/asan/libtkl.a -lpthread -lm
   "build/asan/$test"
 done
+CORE_NIMFLAGS='--cc:clang --passC:-fsanitize=address --passC:-fno-omit-frame-pointer --passL:-fsanitize=address' \
+  bash scripts/test_core.sh test_decode_cleanup
