@@ -12,15 +12,25 @@ static void *initialize(void *unused) {
  (void)unused; uint64_t h=0; TklBuf out={0};
  assert(tkl_create(TKL_ABI_VERSION,cfg,strlen(cfg),&h,&out)==TKL_OK);
  tkl_buf_free(&out);
- assert(tkl_destroy(h)==TKL_OK); return NULL;
+ assert(tkl_destroy(h)==TKL_OK);
+ /* Also leave the foreign thread immediately after a parser error. */
+ const char *bad="{\"config\":";
+ assert(tkl_create(TKL_ABI_VERSION,bad,strlen(bad),&h,&out)==TKL_INVALID_ARGUMENT);
+ assert(h==0); tkl_buf_free(&out);
+ return NULL;
 }
 static void *reader(void *unused) {
  (void)unused;
- while(!atomic_load(&stop)) {
+ /* Every short-lived thread must parse at least once, even on a slow runner. */
+ do {
   TklBuf out={0};
   assert(tkl_get_native(shared,"{\"chainId\":1}",13,&out)==TKL_OK);
   assert(out.len>0); tkl_buf_free(&out); atomic_fetch_add(&reads,1);
- }
+ } while(!atomic_load(&stop));
+ TklBuf out={0};
+ const char *bad="{\"chainId\":";
+ assert(tkl_get_native(shared,bad,strlen(bad),&out)==TKL_INVALID_ARGUMENT);
+ tkl_buf_free(&out);
  return NULL;
 }
 int main(void) {

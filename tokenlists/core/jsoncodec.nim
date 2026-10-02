@@ -95,7 +95,11 @@ proc decodeDocument*[T](
       if char(stream.read()) notin {' ', '\t', '\r', '\n'}:
         return err(tklError(InvalidArgument, "TrailingData", sourceId))
     var typedReader = JsonReader[DefaultFlavor].init(memoryInput(data), flags, conf)
-    ok(typedReader.readValue(T))
+    # Keep ownership here so partially populated fields are destroyed if reading
+    # raises. The value-returning overload can leak its partial result on error.
+    var decoded: T
+    typedReader.readValue(decoded)
+    ok(move(decoded))
   except SerializationError as e:
     err(tklError(InvalidArgument, e.msg, sourceId))
   except IOError as e:
