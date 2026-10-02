@@ -1,0 +1,86 @@
+name: Extended checks
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fuzz:
+    name: Extended fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parsers, planner]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
+        with:
+          nim-version: '2.2.10'
+      - name: Install Clang 18 and sanitizer runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang-18 libclang-rt-18-dev
+          # Select the compiler used by Nim's --cc:clang.
+          echo '/usr/lib/llvm-18/bin' >> "$GITHUB_PATH"
+      - name: Fuzz for 20 minutes
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p build
+          bash scripts/fuzz_core.sh "$TARGET" -runs=-1 -max_total_time=1200 2>&1 | tee build/fuzz.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: extended-fuzz-${{ matrix.target }}
+          path: |
+            build/*.log
+            build/fuzz-*/corpus
+            crash-*
+            timeout-*
+            oom-*
+            leak-*
+          retention-days: 7
+
+  benchmarks:
+    name: Benchmark report
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
+        with:
+          nim-version: '2.2.10'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - name: Record benchmarks without timing thresholds
+        run: |
+          mkdir -p build
+          make bench bench-parse bench-catalogue 2>&1 | tee build/benchmarks.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: benchmarks
+          path: build/benchmarks.log
+          retention-days: 14

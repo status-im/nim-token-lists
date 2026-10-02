@@ -35,10 +35,9 @@ Set `NIM` only if you need to select a different compiler executable.
 ```sh
 git submodule update --init
 mkdir -p build
-make test-nim
+make test-core
 make test-c
 make test-go
-make test-core
 make test-differential
 make test-asan
 ```
@@ -46,6 +45,9 @@ make test-asan
 Go tests cover concurrent access and handle destruction. The separate differential
 test module compares results against pinned SDK parsers; the production Go module
 has no SDK dependency. AddressSanitizer tests require Clang.
+
+`make test-snapshot-fixture` runs the standalone prototype snapshot tests, which
+are separate from the production core suite and are not required by CI.
 
 Create a handle with `tkl.Create(config)`, then call `LoadStored` once to publish
 the initial catalogue. Queries return typed pages containing a revision, total
