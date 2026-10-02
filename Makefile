@@ -1,7 +1,7 @@
 NIM ?= nim
 NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcache:build/nimcache-tests
 
-.PHONY: lib test-core test-nim test-c test-go test-differential test-asan bench bench-parse bench-catalogue fuzz-core isolate audit clean
+.PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan bench bench-parse bench-catalogue fuzz-core isolate audit clean
 lib:
 	NIM="$(NIM)" scripts/build_lib.sh
 test-core:
@@ -13,7 +13,8 @@ bench-catalogue:
 fuzz-core:
 	NIM="$(NIM)" bash scripts/fuzz_core.sh parsers
 	NIM="$(NIM)" bash scripts/fuzz_core.sh planner
-test-nim:
+test-snapshot-fixture:
+	mkdir -p build
 	"$(NIM)" c -r $(NIM_TEST_FLAGS) -o:build/test_snapshot tests/core/test_snapshot.nim
 test-c: lib
 	cc -std=c11 -Wall -Wextra -o build/smoke tests/abi/smoke.c -Iabi build/libtkl.a -lpthread -lm

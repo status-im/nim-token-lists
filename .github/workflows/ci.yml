@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - name: Go formatting and shell syntax
+        run: |
+          mapfile -d '' go_files < <(git ls-files -z '*.go')
+          unformatted=$(gofmt -l "${go_files[@]}")
+          if [[ -n "$unformatted" ]]; then
+            printf 'Run gofmt on:\n%s\n' "$unformatted"
+            exit 1
+          fi
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(git ls-files -z '*.sh')
+      - name: Validate workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" -shellcheck=''
+
+  tests:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
+        with:
+          nim-version: '2.2.10'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: tests/differential/go.sum
+      - name: Core, C ABI, Go race, compatibility and symbol tests
+        run: |
+          mkdir -p build
+          make test-core test-c test-go test-differential audit 2>&1 | tee build/tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: build/*.log
+          retention-days: 7
+
+  safety:
+    name: Memory safety and fuzzing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693 # v2
+        with:
+          nim-version: '2.2.10'
+      - name: Install Clang 18 and sanitizer runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang-18 libclang-rt-18-dev
+          # Select the same compiler for Nim's --cc:clang and direct clang calls.
+          echo '/usr/lib/llvm-18/bin' >> "$GITHUB_PATH"
+      - name: AddressSanitizer
+        run: |
+          mkdir -p build
+          make test-asan 2>&1 | tee build/asan.log
+      - name: Bounded parser and planner fuzzing
+        run: make fuzz-core 2>&1 | tee build/fuzz.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: memory-safety-failure
+          path: |
+            build/*.log
+            build/fuzz-*/corpus
+            crash-*
+            timeout-*
+            oom-*
+            leak-*
+          retention-days: 7
+
+  required:
+    name: PR checks
+    if: always()
+    needs: [static, tests, safety]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = json.loads(os.environ['RESULTS'])
+          failed = {name: job['result'] for name, job in results.items()
+                    if job['result'] != 'success'}
+          if failed:
+              print(f'Required jobs did not succeed: {failed}')
+              sys.exit(1)
+          print('All required checks passed.')
+          PY
