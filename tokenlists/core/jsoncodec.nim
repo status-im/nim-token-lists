@@ -2,10 +2,25 @@
 
 import std/[sets, unicode]
 import json_serialization
-import json_serialization/pkg/results as jsonResults
+import json_serialization/pkg/results as jsonResults except readValue
 import faststreams/inputs
 import ./[types, errors, keys]
-export json_serialization, jsonResults
+export json_serialization
+export jsonResults except readValue
+
+proc readValue*[T](
+    reader: var JsonReader, value: var Opt[T]
+) {.raises: [IOError, SerializationError].} =
+  mixin readValue
+  if reader.tokKind == JsonValueKind.Null:
+    reset value
+    reader.parseNull()
+  else:
+    # The pinned optional reader uses the value-returning overload, whose
+    # partial result can leak on error. Own it until decoding succeeds.
+    var decoded: T
+    reader.readValue(decoded)
+    value.ok(move(decoded))
 
 proc checkUniqueFields(
     reader: var JsonReader
