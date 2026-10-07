@@ -4,6 +4,13 @@ NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcac
 .PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan bench bench-parse bench-catalogue fuzz-core isolate audit clean
 lib:
 	NIM="$(NIM)" scripts/build_lib.sh
+.PHONY: lib-android lib-ios test-windows
+lib-android:
+	NIM="$(NIM)" bash scripts/build_mobile.sh android-$(or $(ARCH),arm64)
+lib-ios:
+	NIM="$(NIM)" bash scripts/build_mobile.sh ios-$(if $(filter iphonesimulator,$(IPHONE_SDK)),simulator-)$(or $(ARCH),arm64)
+test-windows:
+	NIM="$(NIM)" bash scripts/build_windows.sh
 test-core:
 	NIM="$(NIM)" bash scripts/test_core.sh
 bench-parse:

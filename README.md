@@ -74,4 +74,47 @@ Run `make audit` to check the exported-symbol contract.
 
 C tests cover buffer lengths and ABI argument handling.
 
+## Platform readiness
+
+Mobile build scripts produce separate isolated archives, C ABI executables and
+Go test binaries under `build/<target>`. Android uses NDK 27.2.12479018 and API
+28 by default; set `ANDROID_NDK_ROOT` to the installed NDK directory. iOS uses
+the selected Xcode toolchain, with iOS 13 for devices and Intel simulators and
+iOS 14 for ARM simulators (the first supported ARM simulator deployment target).
+
+```sh
+make lib-android ARCH=arm64
+make lib-android ARCH=x86_64
+make lib-ios ARCH=arm64
+make lib-ios ARCH=arm64 IPHONE_SDK=iphonesimulator
+make lib-ios ARCH=x86_64 IPHONE_SDK=iphonesimulator
+```
+
+The linkable archive is `build/<target>/link/libtkl.a`. Set `TKL_BUILD_TESTS=0`
+to build and audit only the archive. The header remains `abi/tkl.h`.
+
+Run tests on an already booted matching emulator or native simulator:
+
+```sh
+bash scripts/test_mobile.sh android-arm64
+SIMULATOR_UDID=<booted-simulator-id> bash scripts/test_mobile.sh ios-simulator-arm64
+```
+
+The Android runner defaults to the emulator; set `ANDROID_SERIAL` for a specific
+authorized device and `ADB` if adb is not on PATH. The iOS runner signs local
+test executables ad hoc; it does not install a device application. Physical iOS
+testing requires a separately signed application harness.
+
+`make test-windows` is the MinGW x86_64 readiness check: build the isolated
+archive, audit its symbols, and execute C and Go tests. The Windows workflow
+must pass before Windows support is considered verified.
+The main CI workflow calls both platform workflows and includes their results
+in the `PR checks` gate; a failed, skipped or cancelled platform job fails it.
+
+Mobile CI builds all five targets and runs Android x86_64 plus the runner's
+native iOS simulator architecture. This is library coverage, not proof of full
+status-go linking, SDS coexistence, application packaging or physical-device
+behavior. The SDK backend must remain available until every supported target
+passes those integration checks as well.
+
 See [specs.md](docs/specs.md) for the library behavior and integration scope.

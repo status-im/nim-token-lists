@@ -4,7 +4,8 @@ package tkl
 
 /*
 #cgo LDFLAGS: -ltkl
-#cgo linux LDFLAGS: -lm -lpthread
+#cgo linux LDFLAGS: -lm
+#cgo linux,!android LDFLAGS: -lpthread
 #include "tkl.h"
 */
 import "C"

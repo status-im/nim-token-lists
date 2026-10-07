@@ -14,6 +14,8 @@ func TestReadersDuringCommits(t *testing.T) {
 	var stop atomic.Bool
 	var reads atomic.Uint64
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	ready.Add(64)
 	for g := 0; g < 64; g++ {
 		wg.Add(1)
 		go func(g int) {
@@ -22,8 +24,13 @@ func TestReadersDuringCommits(t *testing.T) {
 				runtime.LockOSThread()
 				defer runtime.UnlockOSThread()
 			}
-			for !stop.Load() {
+			first := true
+			for first || !stop.Load() {
 				page, err := h.GetNative(1)
+				if first {
+					first = false
+					ready.Done()
+				}
 				if err != nil || len(page.Items) != 1 || page.Items[0].ChainID != 1 {
 					t.Errorf("query %+v %v", page, err)
 					return
@@ -32,6 +39,9 @@ func TestReadersDuringCommits(t *testing.T) {
 			}
 		}(g)
 	}
+	// A fast writer can finish before any reader is scheduled on mobile.
+	// Start mutations only once every reader has attempted its first call.
+	ready.Wait()
 	for i := 0; i < 100; i++ {
 		chains := []uint64{1}
 		if i%2 == 0 {
