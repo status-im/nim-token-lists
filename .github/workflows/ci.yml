@@ -42,9 +42,15 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(git ls-files -z '*.sh')
+      - name: Verify cgo path quoting
+        run: python3 tests/tooling/test_cgo_flags.py
+      - name: Verify symbol audit diagnostics
+        run: python3 tests/tooling/test_symbol_audit.py
+      - name: Verify Android toolchain selection
+        run: python3 tests/tooling/test_android_toolchain.py
       - name: Validate workflows
         run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -shellcheck=''
 
   tests:
@@ -52,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -115,10 +121,16 @@ jobs:
             leak-*
           retention-days: 7
 
+  mobile:
+    uses: ./.github/workflows/mobile.yml
+
+  windows:
+    uses: ./.github/workflows/windows.yml
+
   required:
     name: PR checks
     if: always()
-    needs: [static, tests, safety]
+    needs: [static, tests, safety, mobile, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -1,0 +1,116 @@
+name: Mobile readiness
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  android:
+    name: Android archives and x86_64 runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693
+        with:
+          nim-version: '2.2.10'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - name: Install pinned NDK and emulator image
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'ndk;27.2.12479018' 'emulator' 'platform-tools' \
+            'system-images;android-28;default;x86_64' < <(yes)
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ADB=$ANDROID_HOME/platform-tools/adb" >> "$GITHUB_ENV"
+      - name: Build and audit both architectures
+        run: |
+          bash scripts/build_mobile.sh android-arm64
+          bash scripts/build_mobile.sh android-x86_64
+      - name: Run on Android API 28
+        env:
+          # Keep avdmanager and emulator independent of runner home defaults.
+          ANDROID_AVD_HOME: ${{ runner.temp }}/tkl-avd
+        run: |
+          sudo chmod a+rw /dev/kvm
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
+            --name tkl --package 'system-images;android-28;default;x86_64'
+          test -f "$ANDROID_AVD_HOME/tkl.ini"
+          "$ANDROID_HOME/emulator/emulator" -avd tkl -no-window -no-audio \
+            -no-snapshot -no-boot-anim -gpu swiftshader_indirect > build/emulator.log 2>&1 &
+          trap '"$ADB" -e emu kill || true' EXIT
+          if ! timeout 240 "$ADB" -e wait-for-device; then
+            cat build/emulator.log
+            exit 1
+          fi
+          ready=false
+          for attempt in {1..120}; do
+            if [[ "$("$ADB" -e shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if ! "$ready"; then
+            cat build/emulator.log
+            exit 1
+          fi
+          bash scripts/test_mobile.sh android-x86_64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: android-mobile-logs
+          path: build/*.log
+
+  ios:
+    name: iOS archives and simulator (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: jiro4989/setup-nim-action@189b145833368cc92f1e7b3e166a25a3e057a693
+        with:
+          nim-version: '2.2.10'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - name: Build and audit device and simulator archives
+        run: |
+          bash scripts/build_mobile.sh ios-arm64
+          bash scripts/build_mobile.sh ios-simulator-arm64
+          bash scripts/build_mobile.sh ios-simulator-x86_64
+      - name: Run C ABI and Go suites on simulator
+        run: |
+          export SIMULATOR_UDID="$(xcrun simctl list devices available --json | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for runtime, ds in devices.items() if ".iOS-" in runtime for d in ds if d["name"].startswith("iPhone")))')"
+          xcrun simctl boot "$SIMULATOR_UDID"
+          trap 'xcrun simctl shutdown "$SIMULATOR_UDID" || true' EXIT
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          bash scripts/test_mobile.sh "ios-simulator-$(uname -m)"

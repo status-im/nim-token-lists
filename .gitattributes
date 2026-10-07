@@ -1,0 +1,3 @@
+# Build scripts and symbol allowlists are consumed by Unix and native tools.
+*.sh text eol=lf
+abi/exports-*.txt text eol=lf
