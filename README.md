@@ -68,9 +68,11 @@ CoinGecko Ethereum list in a release build.
 Run `make bench-catalogue` to measure loads, custom updates, owned snapshot
 copies, chain changes, direct and batch lookups, bulk reads and refreshes using
 all eight embedded lists, read at run time, in a release build.
-Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser and
-refresh-state fuzz campaigns under AddressSanitizer. For longer campaigns, run
-`bash scripts/fuzz_core.sh parsers -runs=100000` (or use `planner`).
+Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser,
+refresh-state and parser-differential fuzz campaigns under AddressSanitizer. For
+longer campaigns, run `bash scripts/fuzz_core.sh parsers -runs=100000` (or use
+`planner` or `stream`). The `stream` target compares the single-pass parser with
+the typed decoder it replaced, kept in `tests/oracle/`.
 If Clang lacks the runtime, set `FUZZER_LIB` to a separately built libFuzzer archive.
 
 The core performs no HTTP or storage operations. A host fetches the requests

@@ -4,6 +4,7 @@ import std/[os, strutils, unittest]
 import ../memory/counting
 import ../../abi/published
 import ../../tokenlists/core/[catalogue, validators]
+import ../../tokenlists/core/parsers/[lists, stream]
 import ../../tokenlists/core/parsers/standard
 
 const Padding = 1 shl 20
@@ -201,3 +202,38 @@ suite "compact catalogue":
     check first.getAll().get == second.getAll().get
     checkpoint $storedFirst.retained & " " & $bundledFirst.retained
     check abs(bundledFirst.retained - storedFirst.retained) < 16 * 1024
+
+suite "single-pass parsing":
+  test "a list parse allocates about its own store":
+    for id in Ids:
+      let body = fixture(id & ".json")
+      let format = if id == "status": StatusFormat else: StandardFormat
+      var parsed: ParsedSource
+      let usage = measure:
+        var store = initTokenStore()
+        parsed = parseList(store, body, format, id, DefaultParseLimits).get
+        store.freeze()
+        parsed.store = move(store)
+      checkpoint id & " body " & $body.len & " churn " & $usage.churn &
+        " peak " & $usage.peak & " retained " & $usage.retained
+      # Stores grow by doubling and are trimmed once: about 3x the body.
+      check usage.churn < 4 * body.len
+      check usage.peak < 2 * body.len
+
+  test "a refresh validates and parses a fetched body in one pass":
+    let body = fixture("uniswap.json")
+    let format = StandardFormat
+    let usage = measure:
+      discard fetchedListBody(body, format, "uniswap", DefaultParseLimits).get
+    checkpoint "body " & $body.len & " churn " & $usage.churn
+    check usage.churn < 4 * body.len
+
+  test "a full load allocates a few times its bodies":
+    let (config, bodies) = embedded()
+    var total = 0
+    for body in bodies:
+      total += body.len
+    let usage = measure:
+      discard loadAll(config, bodies)
+    checkpoint "bodies " & $total & " churn " & $usage.churn
+    check usage.churn < 4 * total

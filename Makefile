@@ -20,6 +20,7 @@ bench-catalogue:
 fuzz-core:
 	NIM="$(NIM)" bash scripts/fuzz_core.sh parsers
 	NIM="$(NIM)" bash scripts/fuzz_core.sh planner
+	NIM="$(NIM)" bash scripts/fuzz_core.sh stream
 test-snapshot-fixture:
 	mkdir -p build
 	"$(NIM)" c -r $(NIM_TEST_FLAGS) -o:build/test_snapshot tests/core/test_snapshot.nim
