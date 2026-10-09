@@ -37,7 +37,7 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
   var input = newString(int(size))
   copyMem(addr input[0], data, int(size))
   let tight = ParseLimits(maxBytes: 4096, maxDepth: 6, maxArrayItems: 16,
-    maxObjectMembers: 12, maxStringBytes: 48)
+    maxObjectMembers: 12, maxStringBytes: 48, maxRows: 1 shl 30)
   for limits in [DefaultParseLimits, tight]:
     for format in [StandardFormat, StatusFormat]:
       for validate in [false, true]:

@@ -82,6 +82,7 @@ type Limits struct {
 	MaxArrayItems    int `json:"maxArrayItems"`
 	MaxObjectMembers int `json:"maxObjectMembers"`
 	MaxStringBytes   int `json:"maxStringBytes"`
+	MaxRows          int `json:"maxRows"`
 }
 
 // Bootstrap describes the host's persisted state; Stored is the metadata of

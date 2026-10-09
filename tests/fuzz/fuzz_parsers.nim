@@ -20,7 +20,7 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
   if size > 0:
     copyMem(addr input[0], data, int(size))
   let limits = ParseLimits(maxBytes: 65536, maxDepth: 32,
-    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192)
+    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192, maxRows: 1 shl 30)
   discard parseKey(input)
   discard normalizeAddress(input)
   discard parseRegistry(input, limits = limits)

@@ -169,7 +169,7 @@ proc tkl_create(
     let limits = decoded.get.limits.get(DefaultParseLimits)
     if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
         limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
-        limits.maxStringBytes <= 0:
+        limits.maxStringBytes <= 0 or limits.maxRows <= 0:
       return errorBuf(outBuf, tklError(InvalidArgument, "InvalidLimits"))
     acquire(registryLock)
     defer: release(registryLock)
