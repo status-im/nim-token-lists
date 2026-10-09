@@ -379,7 +379,7 @@ proc refreshApply*(
       if next.isErr:
         discard catalogue.planner.abortPlan(planId, Aborted)
         return err(next.error)
-      let shared = share(move(next.get))
+      let shared = share(next.get)
       catalogue.refreshChange = describeChange(catalogue.current[], shared[],
         RefreshChange)
       catalogue.refreshSnapshot = shared
