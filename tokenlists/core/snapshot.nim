@@ -27,6 +27,17 @@ type
     aliases: seq[(Identity, Identity)]
     skipped: seq[Identity]
 
+proc `=copy`*(dest: var Snapshot, source: Snapshot) {.error:
+  "a Snapshot copy would share its store ref; use `detached`".}
+  ## Readers copy snapshots under a shared lock, where updating the store's
+  ## reference count would race.
+
+proc get*(built: sink Result[Snapshot, TklError]): Snapshot =
+  ## Moves the snapshot out; the generic `get` would copy it.
+  var moved = built
+  doAssert moved.isOk, "get on an error Result: " & $moved.error
+  move(moved.value)
+
 type SnapshotRef* = ref Snapshot
   ## A published snapshot, shared and never mutated. Copying the ref is not
   ## thread-safe: share it across threads only behind a lock.
