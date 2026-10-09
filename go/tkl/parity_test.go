@@ -100,10 +100,10 @@ func parityBodies(t *testing.T) map[string][]byte {
 	return bodies
 }
 
-func parityRegistry() []byte {
+func parityRegistry(ids []string) []byte {
 	var b strings.Builder
 	b.WriteString(`{"timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokenLists":[`)
-	for i, id := range parityIDs {
+	for i, id := range ids {
 		if i > 0 {
 			b.WriteString(",")
 		}
@@ -118,21 +118,31 @@ func parityRegistry() []byte {
 }
 
 func (r *parityRun) refresh(stage string, now int64, bodies map[string][]byte, changed map[string]bool) {
+	r.refreshWith(stage, now, parityIDs, func(request FetchRequest) FetchResult {
+		if changed[request.ID] || request.ETag == "" {
+			return FetchResult{ID: request.ID, Status: 200, ETag: fmt.Sprintf("%s-%d", request.ID, now), Body: bodies[request.ID]}
+		}
+		return FetchResult{ID: request.ID, Status: 304}
+	})
+}
+
+// refreshWith refreshes from a registry of ids, answering each list request.
+func (r *parityRun) refreshWith(stage string, now int64, ids []string, respond func(FetchRequest) FetchResult) {
 	plan, err := r.h.RefreshPlan(now, true)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	report, err := r.h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, ETag: "r", Body: parityRegistry()}}, now)
+	etag := "r"
+	if len(ids) != len(parityIDs) {
+		etag = fmt.Sprintf("r-%d", len(ids))
+	}
+	report, err := r.h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, ETag: etag, Body: parityRegistry(ids)}}, now)
 	if err != nil || report.Step != "NeedMore" {
 		r.t.Fatal(report, err)
 	}
 	var results []FetchResult
 	for _, request := range report.Requests {
-		if changed[request.ID] || request.ETag == "" {
-			results = append(results, FetchResult{ID: request.ID, Status: 200, ETag: fmt.Sprintf("%s-%d", request.ID, now), Body: bodies[request.ID]})
-		} else {
-			results = append(results, FetchResult{ID: request.ID, Status: 304})
-		}
+		results = append(results, respond(request))
 	}
 	ready, err := r.h.RefreshApply(plan.ID, results, now)
 	if err != nil || ready.Step != "Ready" {
@@ -208,6 +218,53 @@ func TestQueryOutputParity(t *testing.T) {
 	r.raw("restore-chains", "set_chains",
 		map[string]any{"chains": config.Chains})
 	r.queries("restored")
+
+	// A failed fetch and an invalid body keep their rows; 304s follow.
+	r.refreshWith("refresh-failed", 300, parityIDs, func(request FetchRequest) FetchResult {
+		switch request.ID {
+		case "uniswap":
+			return FetchResult{ID: request.ID, Status: 503}
+		case "coingecko_base":
+			return FetchResult{ID: request.ID, Status: 200, ETag: "bad", Body: []byte(`{"name":"x"}`)}
+		}
+		return FetchResult{ID: request.ID, Status: 304}
+	})
+	r.queries("refresh-failed")
+	r.refreshWith("refresh-304", 400, parityIDs, func(request FetchRequest) FetchResult {
+		return FetchResult{ID: request.ID, Status: 304}
+	})
+	r.queries("refresh-304")
+	kept := []string{}
+	for _, id := range parityIDs {
+		if id != "coingecko_linea" && id != "uniswap" {
+			kept = append(kept, id)
+		}
+	}
+	r.refreshWith("refresh-drop", 500, kept, func(request FetchRequest) FetchResult {
+		return FetchResult{ID: request.ID, Status: 304}
+	})
+	r.queries("refresh-drop")
+
+	var page Page[Token]
+	if err = json.Unmarshal(r.raw("skips-source", "get_all", map[string]any{"offset": 0, "limit": 0}), &page); err != nil {
+		t.Fatal(err)
+	}
+	policy = config.Policy
+	policy.SkippedKeys = nil
+	policy.NativeAliases = nil
+	for i, token := range page.Items {
+		key := fmt.Sprintf("%d-%s", token.ChainID, token.Address)
+		switch i % 3 {
+		case 0:
+			policy.SkippedKeys = append(policy.SkippedKeys, key, fmt.Sprintf("%d-%s", token.ChainID+1, token.Address))
+		case 1:
+			if i%7 == 1 {
+				policy.NativeAliases = append(policy.NativeAliases, Identity{ChainID: token.ChainID, Address: token.Address})
+			}
+		}
+	}
+	r.raw("many-skips", "set_policy", map[string]any{"policy": policy})
+	r.queries("many-skips")
 
 	if os.Getenv("TKL_UPDATE_PARITY") == "1" {
 		if err = os.MkdirAll(filepath.Dir(parityGolden), 0o755); err != nil {

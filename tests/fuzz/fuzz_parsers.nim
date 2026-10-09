@@ -20,7 +20,7 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
   if size > 0:
     copyMem(addr input[0], data, int(size))
   let limits = ParseLimits(maxBytes: 65536, maxDepth: 32,
-    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192)
+    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192, maxRows: 1 shl 30)
   discard parseKey(input)
   discard normalizeAddress(input)
   discard parseRegistry(input, limits = limits)
@@ -65,14 +65,13 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
           address.add toHex(packed[at + 8 + offset]).toLowerAscii
         doAssert (uint64(packed[at]) or (uint64(packed[at + 1]) shl 8)) == token.chainId
         doAssert address == token.address and packed[at + 28] == token.decimals
-    # Direct encoding against json_serialization, which raises on 0x0f/0x1f.
+    # Direct encoding against json_serialization.
     var lists = held[].getLists()
     for list in lists.items.mitems:
       if string(list.tags).len == 0:
         list.tags = JsonString("{}")
     let actual = held[].listsOutput.json
-    if "\\u000f" notin actual and "\\u001f" notin actual:
-      doAssert actual == Json.encode(lists)
-      doAssert held[].allOutput().get.json == Json.encode(held[].getAll().get)
-      doAssert held[].diagnosticsOutput.json == Json.encode(held[].getDiagnostics())
+    doAssert actual == Json.encode(lists)
+    doAssert held[].allOutput().get.json == Json.encode(held[].getAll().get)
+    doAssert held[].diagnosticsOutput.json == Json.encode(held[].getDiagnostics())
   0

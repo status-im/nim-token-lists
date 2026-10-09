@@ -39,7 +39,7 @@ func TestProductionCatalogue(t *testing.T) {
 }
 
 func TestLoadChecksDocumentByteLimits(t *testing.T) {
-	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64, MaxRows: 100}
 	config := Config{MainListID: "main", InitialLists: []ListContent{{ID: "main"}}}
 	document := `{"tokens":[]}`
 	for size, ok := range map[int]bool{128: true, 129: false} {
@@ -70,7 +70,7 @@ func TestNoArgumentQueriesSendObjectEnvelopes(t *testing.T) {
 }
 
 func TestFetchEnvelopeAllowsDocumentsWithinByteLimit(t *testing.T) {
-	limits := Limits{MaxBytes: 2048, MaxDepth: 16, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	limits := Limits{MaxBytes: 2048, MaxDepth: 16, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64, MaxRows: 100}
 	h, err := CreateWithLimits(Config{Chains: []uint64{1}, RegistryID: "registry", RegistryURL: "https://example.org/registry"}, &limits)
 	if err != nil {
 		t.Fatal(err)

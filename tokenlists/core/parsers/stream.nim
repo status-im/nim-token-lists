@@ -6,9 +6,9 @@
 ## straight into a token store. tests/oracle keeps that decoder for
 ## differential tests and fuzzing.
 
-import std/[strutils, unicode, uri]
+import std/[algorithm, math, strutils, unicode, uri]
 from json_serialization/lexer import JsonErrorKind
-import ../[types, errors, keys, store]
+import ../[types, errors, keys, store, hashing]
 import ./common
 export common
 
@@ -64,6 +64,8 @@ type
     text: seq[char]
       ## Decoded escaped strings of the current row.
     contracts: seq[Contract]
+    contractSlots: seq[uint32]
+      ## Contract index + 1 by chain id once a row has many contracts.
 
   Field = enum
     OtherField, NameField, TimestampField, VersionField, TagsField, LogoField,
@@ -82,7 +84,8 @@ type
     seen: set[Field]
     list: TokenList
     logoNull, tagsSet: bool
-    rowIndex: int
+    rowIndex, rowCount: int
+      ## `rowCount`: rows the tokens expand to, contracts included.
 
 const
   ManyKeys = 16
@@ -493,11 +496,8 @@ proc scanLiteral(s: var Scanner, word: string, error: JsonErrorKind): bool =
 
 proc skipValue(s: var Scanner, kind: Kind): bool
 
-func keyHash(text: openArray[char]): uint32 =
-  var hash = 0x811C9DC5'u32
-  for ch in text:
-    hash = (hash xor uint32(ord(ch))) * 0x01000193'u32
-  hash
+func keyHash*(text: openArray[char], seed = hashSeed): uint32 {.inline.} =
+  uint32(hashBytes(text, seed))
 
 template keyText(s: Scanner, slot: KeySlot): openArray[char] =
   if slot.decoded: s.keyBytes.toOpenArray(slot.start, slot.start + slot.len - 1)
@@ -526,6 +526,7 @@ proc indexKeys(s: var Scanner, frame: int) =
   for index in frame ..< s.keys.len:
     var slot = s.keys[index].hash and mask
     while s.tables[level][slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     s.tables[level][slot] = uint32(index + 1)
 
@@ -550,6 +551,7 @@ proc addKey(s: var Scanner, raw: Text, escaped: bool, frame: int): bool =
   let mask = uint32(s.tables[level].len - 1)
   var position = slot.hash and mask
   while s.tables[level][position] != 0:
+    countProbe()
     if s.sameKey(s.keys[s.tables[level][position] - 1], slot):
       return s.fail("DuplicateObjectField")
     position = (position + 1) and mask
@@ -851,6 +853,44 @@ proc normalized(s: Scanner, first, last: int): string =
         else: result.add byte
       result.add '"'
 
+proc seenContract(s: Scanner, chainId: uint64): bool =
+  ## Whether an earlier contract of the row has `chainId`.
+  if s.contracts.len < ManyKeys:
+    for contract in s.contracts:
+      countProbe()
+      if contract.chainId == chainId:
+        return true
+    return false
+  let mask = uint64(s.contractSlots.len - 1)
+  var slot = hashValue(chainId, hashSeed) and mask
+  while s.contractSlots[slot] != 0:
+    countProbe()
+    if s.contracts[s.contractSlots[slot] - 1].chainId == chainId:
+      return true
+    slot = (slot + 1) and mask
+  false
+
+proc addContract(s: var Scanner, contract: Contract) =
+  s.contracts.add contract
+  if s.contracts.len < ManyKeys:
+    return
+  var first = s.contracts.high
+  if s.contracts.len == ManyKeys or 2 * s.contracts.len > s.contractSlots.len:
+    s.contractSlots.setLen(0)
+    s.contractSlots.setLen(nextPowerOfTwo(4 * s.contracts.len))
+    first = 0
+  let mask = uint64(s.contractSlots.len - 1)
+  for index in first ..< s.contracts.len:
+    var slot = hashValue(s.contracts[index].chainId, hashSeed) and mask
+    while s.contractSlots[slot] != 0:
+      countProbe()
+      slot = (slot + 1) and mask
+    s.contractSlots[slot] = uint32(index + 1)
+
+func byChainId(a, b: Contract): int =
+  countProbe()
+  cmp(a.chainId, b.chainId)
+
 proc contractsValue(
     s: var Scanner, kind: Kind, faults: var Faults, modes: set[Mode]
 ): bool =
@@ -874,10 +914,8 @@ proc contractsValue(
       chainId = chainId * 10 + digit
     if not valid:
       faults.fault(modes, "BadContractChainId")
-    else:
-      for contract in s.contracts:
-        if contract.chainId == chainId:
-          faults.fault(modes, "DuplicateContractChainId")
+    elif s.seenContract(chainId):
+      faults.fault(modes, "DuplicateContractChainId")
     var valueKind: Kind
     if not s.kindAt(valueKind):
       return false
@@ -885,15 +923,19 @@ proc contractsValue(
     if not s.stringValue(valueKind, faults, modes, {}, address):
       return false
     if valid:
-      s.contracts.add Contract(chainId: chainId, address: address)
+      s.addContract Contract(chainId: chainId, address: address)
   # Stable order by chain id, like the decoder's sort.
-  for index in 1 ..< s.contracts.len:
-    var position = index
-    let contract = s.contracts[index]
-    while position > 0 and s.contracts[position - 1].chainId > contract.chainId:
-      s.contracts[position] = s.contracts[position - 1]
-      dec position
-    s.contracts[position] = contract
+  if s.contracts.len >= ManyKeys:
+    s.contracts.sort(byChainId)
+  else:
+    for index in 1 ..< s.contracts.len:
+      var position = index
+      let contract = s.contracts[index]
+      while position > 0 and s.contracts[position - 1].chainId > contract.chainId:
+        countProbe()
+        s.contracts[position] = s.contracts[position - 1]
+        dec position
+      s.contracts[position] = contract
   true
 
 proc rowValue(
@@ -908,13 +950,13 @@ proc rowValue(
     start = s.pos
     ws = s.ws
     adjust = s.adjust
+  s.contracts.setLen(0)
   if kind != ObjectValue:
     row.faults.fault(modes, message(errCurlyLeExpected))
     if not s.skipValue(kind):
       return false
   else:
     let known = if format == StandardFormat: StandardFields else: StatusFields
-    s.contracts.setLen(0)
     s.members(slot):
       let field = s.fieldOf(slot, known)
       var valueKind: Kind
@@ -964,19 +1006,28 @@ proc tokensValue(
     var row = Row()
     if not s.rowValue(format, modes, row):
       return false
+    document.rowCount += (if format == StandardFormat: 1 else: s.contracts.len)
+    if document.rowCount > s.limits.maxRows:
+      return s.fail("TooLarge")
     for mode in modes:
       if row.faults[mode].found and not document.rowFaults[mode].found:
         document.rowFaults[mode] = row.faults[mode]
     if not store.isNil and not document.faults[Lenient].found and
         not document.rowFaults[Lenient].found:
       if format == StandardFormat:
-        source.rows.add store[].addToken(row.chainId, s.view(row.address),
+        let added = store[].addToken(row.chainId, s.view(row.address),
           row.decimals, s.view(row.name), s.view(row.symbol), s.view(row.logo), "")
+        if added.isNone:
+          return s.fail("TooLarge")
+        source.rows.add added.get
       else:
         for contract in s.contracts:
-          source.rows.add store[].addToken(contract.chainId,
+          let added = store[].addToken(contract.chainId,
             s.view(contract.address), row.decimals, s.view(row.name),
             s.view(row.symbol), s.view(row.logo), s.view(row.crossChainId))
+          if added.isNone:
+            return s.fail("TooLarge")
+          source.rows.add added.get
           source.rowNumbers.add uint32(document.rowIndex)
     inc document.rowIndex
   true
@@ -1086,7 +1137,7 @@ proc scanList(
   doAssert format in {StandardFormat, StatusFormat}
   if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
       limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
-      limits.maxStringBytes <= 0:
+      limits.maxStringBytes <= 0 or limits.maxRows <= 0:
     return err(tklError(InvalidArgument, "InvalidLimits", sourceId))
   if body.len > limits.maxBytes:
     return err(tklError(InvalidArgument, "TooLarge", sourceId))

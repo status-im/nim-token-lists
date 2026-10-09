@@ -9,7 +9,7 @@ for dep in nim-result nim-stew nim-faststreams nim-serialization nim-json-serial
 done
 tests=("${@:-}")
 if [[ $# == 0 ]]; then
-  tests=(test_keys test_store test_store_limits test_parsers test_stream test_encoding test_packed test_validators test_decode_cleanup test_fixtures test_builder test_catalogue test_publication test_planner test_refresh_reuse test_load test_memory)
+  tests=(test_keys test_store test_store_limits test_parsers test_stream test_encoding test_packed test_validators test_decode_cleanup test_fixtures test_builder test_catalogue test_publication test_planner test_refresh_reuse test_load test_memory test_adversarial)
 fi
 for test in "${tests[@]}"; do
   "$NIM" c -r --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --skipUserCfg:on \

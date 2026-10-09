@@ -1,8 +1,7 @@
 {.push raises: [], gcsafe.}
 
 import ./[builder, keys, planner]
-from ./validators import validateDocument
-from ./parsers/registry import parseRegistry
+from ./validators import validRegistry
 export builder, planner
 
 type
@@ -171,9 +170,7 @@ proc loadList*(
         load.storedRegistry.get.isOk:
       slot[] = Opt.some(Result[Registry, TklError].ok(Registry()))
       return ok()
-    let valid = validateDocument(body, RegistryFormat, id, load.limits)
-    slot[] = Opt.some(if valid.isErr: Result[Registry, TklError].err(valid.error)
-      else: parseRegistry(body, id, load.limits))
+    slot[] = Opt.some(validRegistry(body, id, load.limits))
     return ok()
   load.sources.loadBody(load.config, load.stored, id, origin, body, load.limits)
 
