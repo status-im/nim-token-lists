@@ -253,6 +253,21 @@ suite "direct query encoding":
       text = snapshot[].listsOutput.json
     check lists.churn < text.len + 64 * 1024
 
+  test "packed by-chains output allocates nothing but its buffer":
+    let (config, bodies) = embedded()
+    let catalogue = loadAll(config, bodies)
+    let snapshot = catalogue.published
+    let chains = [1'u64, 10, 42161, 8453, 59144, 56]
+    var data: seq[byte]
+    let sized = measure:
+      data = newSeqUninit[byte](snapshot[].packedLen(chains))
+    check data.len > 16 + 32 * 1000
+    check sized.churn < data.len + 64
+    let written = measure:
+      snapshot[].writePacked(chains, cast[ptr UncheckedArray[byte]](addr data[0]),
+        data.len)
+    check written.churn == 0
+
 suite "compact diagnostics":
   test "rows on a disabled chain cost no per-row diagnostic":
     let (config, bodies) = embedded()

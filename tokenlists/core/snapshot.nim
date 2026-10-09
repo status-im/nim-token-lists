@@ -468,6 +468,57 @@ proc json*(output: QueryOutput): string =
   if result.len > 0:
     output.writeJson(cast[ptr UncheckedArray[char]](addr result[0]), result.len)
 
+const
+  PackedMagic* = 0x31504B54'u32
+    ## "TKP1": the packed by-chains layout, version 1.
+  PackedHeaderBytes* = 16
+    ## magic u32, count u32, revision u64.
+  PackedRecordBytes* = 32
+    ## chainId u64, address [20]u8, decimals u8, 3 zero bytes.
+
+func packedCount(snapshot: Snapshot, chains: openArray[uint64]): int =
+  for reference in snapshot.tokens:
+    if snapshot.identityOf(reference).chainId in chains:
+      inc result
+
+func packedLen*(snapshot: Snapshot, chains: openArray[uint64]): int =
+  ## Bytes of the packed `byChainsOutput(chains)`.
+  PackedHeaderBytes + snapshot.packedCount(chains) * PackedRecordBytes
+
+proc putLe(data: ptr UncheckedArray[byte], at: int, value: uint64, size: int) {.inline.} =
+  for index in 0 ..< size:
+    data[at + index] = byte((value shr (8 * index)) and 0xFF)
+
+proc writePacked*(
+    snapshot: Snapshot, chains: openArray[uint64],
+    data: ptr UncheckedArray[byte], size: int
+) =
+  ## Writes the `size` = `packedLen` bytes of the chains' tokens, in
+  ## `byChainsOutput` order, as little-endian records without strings.
+  let count = (size - PackedHeaderBytes) div PackedRecordBytes
+  doAssert size == PackedHeaderBytes + count * PackedRecordBytes
+  data.putLe(0, PackedMagic, 4)
+  data.putLe(4, uint64(count), 4)
+  data.putLe(8, snapshot.revisionValue, 8)
+  var at = PackedHeaderBytes
+  for reference in snapshot.tokens:
+    let store = snapshot.storeOf(reference)
+    let record = unsafeAddr store[].record(reference.indexOf)
+    let chainId = store[].chainId(record[])
+    if chainId in chains:
+      doAssert at < size
+      data.putLe(at, chainId, 8)
+      copyMem(addr data[at + 8], unsafeAddr record.address[0], 20)
+      data[at + 28] = record.decimals
+      zeroMem(addr data[at + 29], 3)
+      at += PackedRecordBytes
+  doAssert at == size
+
+proc packedByChains*(snapshot: Snapshot, chains: openArray[uint64]): seq[byte] =
+  result = newSeq[byte](snapshot.packedLen(chains))
+  snapshot.writePacked(chains, cast[ptr UncheckedArray[byte]](addr result[0]),
+    result.len)
+
 func tokenPage(output: QueryOutput): Page[Token] =
   ## Materializes a token output for Nim callers.
   result = Page[Token](revision: output.snapshot.revisionValue,
