@@ -49,6 +49,10 @@ type
 const
   EmptyText* = TextId(0)
   MaxPrefixes = 255
+  MaxRecords* {.intdefine: "tklMaxRecords".} = 0x7FFF_FFFF
+    ## Record indices stay below a snapshot's extra-store bit.
+  MaxTextBytes {.intdefine: "tklMaxTextBytes".} = int(high(uint32))
+    ## Arena offsets are 32-bit.
   PrefixSlashes = 5
   HexDigits = "0123456789abcdef"
 
@@ -140,6 +144,17 @@ proc rehashTexts(store: var TokenStore) =
       slot = (slot + 1) and mask
     store.textSlots[slot] = uint32(id)
 
+proc findText(store: TokenStore, text: openArray[char], slot: var uint64): int =
+  ## The id of `text`, or -1 with `slot` the free slot it would take.
+  let mask = uint64(store.textSlots.len - 1)
+  slot = hashText(text) and mask
+  while store.textSlots[slot] != 0:
+    let id = TextId(store.textSlots[slot])
+    if store.textEquals(id, text):
+      return int(uint32(id))
+    slot = (slot + 1) and mask
+  -1
+
 proc intern*(store: var TokenStore, text: openArray[char]): TextId =
   doAssert not store.frozenValue
   if text.len == 0:
@@ -148,13 +163,11 @@ proc intern*(store: var TokenStore, text: openArray[char]): TextId =
     store.ends.add 0
   if store.textSlots.len < 2 * (store.ends.len + 1):
     store.rehashTexts()
-  let mask = uint64(store.textSlots.len - 1)
-  var slot = hashText(text) and mask
-  while store.textSlots[slot] != 0:
-    let id = TextId(store.textSlots[slot])
-    if store.textEquals(id, text):
-      return id
-    slot = (slot + 1) and mask
+  var slot: uint64
+  let found = store.findText(text, slot)
+  if found >= 0:
+    return TextId(uint32(found))
+  doAssert store.bytes.len + text.len <= MaxTextBytes, "token store arena full"
   let start = store.bytes.len
   store.bytes.setLen(start + text.len)
   copyMem(addr store.bytes[start], unsafeAddr text[0], text.len)
@@ -179,14 +192,24 @@ func prefixEnd(text: openArray[char]): int =
         return index + 1
   0
 
+proc prefixEntry(store: var TokenStore, prefix: openArray[char]): int =
+  ## The prefix table entry of `prefix`, added if there is room, or -1. A
+  ## prefix the full table cannot take is not interned.
+  var slot: uint64
+  let found = if store.textSlots.len == 0: -1 else: store.findText(prefix, slot)
+  if found >= 0:
+    result = store.prefixes.find(TextId(uint32(found)))
+    if result >= 0:
+      return
+  if store.prefixes.len >= MaxPrefixes:
+    return -1
+  store.prefixes.add store.intern(prefix)
+  result = store.prefixes.high
+
 proc internLogo(store: var TokenStore, text: openArray[char]): (uint8, TextId) =
   let split = prefixEnd(text)
   if split > 0 and split < text.len:
-    let prefix = store.intern(text.toOpenArray(0, split - 1))
-    var entry = store.prefixes.find(prefix)
-    if entry < 0 and store.prefixes.len < MaxPrefixes:
-      store.prefixes.add prefix
-      entry = store.prefixes.high
+    let entry = store.prefixEntry(text.toOpenArray(0, split - 1))
     if entry >= 0:
       return (uint8(entry + 1), store.intern(text.toOpenArray(split, text.high)))
   (0'u8, store.intern(text))
@@ -313,6 +336,7 @@ proc addRecord(store: var TokenStore, record: TokenRecord): uint32 =
     if store.records[index] == record:
       return index
     slot = (slot + 1) and mask
+  doAssert store.records.len < MaxRecords, "token store full"
   store.records.add record
   store.recordSlots[slot] = uint32(store.records.len)
   uint32(store.records.high)
@@ -349,11 +373,8 @@ proc copyLogo(
   if record.logoPrefix == 0:
     let (first, last) = source.span(record.logo)
     return store.internLogo(source.bytes.toOpenArray(first, last - 1))
-  let prefix = store.copyText(source, source.prefixes[record.logoPrefix - 1])
-  var entry = store.prefixes.find(prefix)
-  if entry < 0 and store.prefixes.len < MaxPrefixes:
-    store.prefixes.add prefix
-    entry = store.prefixes.high
+  let (first, last) = source.span(source.prefixes[record.logoPrefix - 1])
+  let entry = store.prefixEntry(source.bytes.toOpenArray(first, last - 1))
   if entry < 0:
     return (0'u8, store.intern(source.logo(record)))
   (uint8(entry + 1), store.copyText(source, record.logo))

@@ -53,6 +53,7 @@ type SnapshotRef* = ref Snapshot
   ## thread-safe: share it across threads only behind a lock.
 
 const ExtraRef = 0x8000_0000'u32
+static: doAssert MaxRecords <= int(ExtraRef)
 
 func `==`(a, b: TokenRef): bool {.borrow.}
 
