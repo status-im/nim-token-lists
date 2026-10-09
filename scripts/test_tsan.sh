@@ -9,3 +9,5 @@ for test in smoke transactions; do
     -o "build/tsan/$test" "tests/abi/$test.c" -Iabi build/tsan/libtkl.a -lpthread -lm
   "build/tsan/$test"
 done
+CORE_NIMFLAGS='--cc:clang --passC:-fsanitize=thread --passC:-fno-omit-frame-pointer --passL:-fsanitize=thread' \
+  bash scripts/test_core.sh test_publication

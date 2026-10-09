@@ -105,6 +105,8 @@ later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
 Each publication builds one new immutable snapshot; none is changed afterwards.
+Snapshot values cannot be copied implicitly, since a copy would share the store
+reference with readers on other threads; `detached` makes an independent copy.
 The C adapter publishes the core's snapshot itself, never a copy. Readers borrow
 it under the read lock through queries and result encoding without touching its
 reference count. A separate writer mutex serializes core mutation, construction,
