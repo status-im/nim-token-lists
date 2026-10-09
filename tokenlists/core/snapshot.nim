@@ -77,6 +77,11 @@ func detached*(snapshot: Snapshot): Snapshot =
     result.base = StoreRef()
     result.base[] = snapshot.base[]
 
+func storeBytes*(snapshot: Snapshot): int =
+  ## Payload bytes of the snapshot's stores, for memory tests.
+  snapshot.extra.retainedBytes +
+    (if snapshot.base.isNil: 0 else: snapshot.base[].retainedBytes)
+
 func storeOf(snapshot: Snapshot, reference: TokenRef): ptr TokenStore {.inline.} =
   # A pointer, not a value: the stores are borrowed, never copied.
   if (uint32(reference) and ExtraRef) != 0: unsafeAddr snapshot.extra

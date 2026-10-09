@@ -102,7 +102,8 @@ suite "publication":
     check first.churn == 0
     let owned = measure:
       discard catalogue.snapshot
-    check owned.churn > 0
+    # An owned snapshot is detached: it copies the stores.
+    check owned.churn >= catalogue.published[].storeBytes
     discard catalogue.setChains(@[1'u64]).get
     let previous = catalogue.published
     discard catalogue.setChains(@[1'u64, 10]).get
