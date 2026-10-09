@@ -25,11 +25,18 @@ func mix64*(value: uint64): uint64 {.inline.} =
   result = result xor (result shr 31)
 
 func hashBytes*(data: openArray[char], seed: uint64): uint64 =
-  ## FNV-1a from a seeded basis, finalized so slots depend on every seed bit.
-  var hash = 0xCBF29CE484222325'u64 xor seed
-  for ch in data:
-    hash = (hash xor uint64(ord(ch))) * 0x100000001B3'u64
-  mix64(hash)
+  ## Eight bytes at a time, each word through the full mixer, so no input
+  ## bits cancel independently of the seed.
+  var hash = seed xor uint64(data.len)
+  if data.len == 0:
+    return mix64(hash)
+  var index = 0
+  while index < data.len:
+    var word: uint64
+    copyMem(addr word, unsafeAddr data[index], min(8, data.len - index))
+    hash = mix64(hash xor word)
+    index += 8
+  hash
 
 func hashValue*(value, seed: uint64): uint64 {.inline.} =
   mix64(value xor seed)
