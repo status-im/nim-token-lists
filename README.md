@@ -6,6 +6,7 @@ A Nim library for fungible-token lists.
 
 - Deterministic catalogue building, immutable snapshots and paginated queries.
 - A packed binary by-chains query (chain, address, decimals) for balance fetching.
+- Narrow queries for tokens sharing cross-chain ids (packed) and for a symbol or name on one chain.
 - A versioned C ABI exposing the catalogue and transaction operations.
 - A typed Go wrapper that calls the library through C bindings.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
