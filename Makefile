@@ -35,6 +35,8 @@ test-c: lib
 	build/transactions
 	cc -std=c11 -Wall -Wextra -o build/packed tests/abi/packed.c -Iabi build/libtkl.a -lpthread -lm
 	build/packed
+	cc -std=c11 -Wall -Wextra -o build/narrow tests/abi/narrow.c -Iabi build/libtkl.a -lpthread -lm
+	build/narrow
 test-go: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 $(GO_LIB_STAMP) ./...
 test-differential: lib

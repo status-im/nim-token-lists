@@ -29,6 +29,8 @@ type
     chainId: uint64
     chains: seq[uint64]
     keys: seq[string]
+    crossChainIds: seq[string]
+    symbol: string
     chainIds: seq[uint64]
     addresses: seq[string]
     offset, limit: int
@@ -97,6 +99,15 @@ proc fillOutput(outBuf: ptr TklBuf, output: QueryOutput): bool =
   if mem.isNil: return false
   output.writeJson(cast[ptr UncheckedArray[char]](mem), size)
   outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(max(size, 1)))
+  true
+
+proc fillPacked(outBuf: ptr TklBuf, output: QueryOutput): bool =
+  ## Writes a token answer as packed records into one exactly sized allocation.
+  let size = output.packedLen
+  let mem = cMalloc(csize_t(size))
+  if mem.isNil: return false
+  output.writePacked(cast[ptr UncheckedArray[byte]](mem), size)
+  outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(size))
   true
 
 proc errorBuf(outBuf: ptr TklBuf, error: TklError): int32 =
@@ -229,7 +240,7 @@ proc encodeResult[T](value: Result[T, TklError]): Result[string, TklError] =
 
 proc operate(
     h: ptr HandleObj, input: openArray[char], outBuf: ptr TklBuf,
-    reader: QueryHandler, writer: WriterHandler
+    reader: QueryHandler, writer: WriterHandler, packed: bool
 ): Result[string, TklError] =
   let request = ?decodeDocument(input, Request, envelopeLimits(h.limits))
   if not reader.isNil:
@@ -238,7 +249,9 @@ proc operate(
         return err(tklError(InvalidArgument, "NotLoaded"))
       # Encoded under the read lock: the output borrows the snapshot.
       let output = ?reader(snapshot[], request)
-      if not fillOutput(outBuf, output):
+      let filled = if packed: fillPacked(outBuf, output)
+        else: fillOutput(outBuf, output)
+      if not filled:
         return err(tklError(Internal, "OutOfMemory"))
       return ok("")
   doAssert not writer.isNil
@@ -270,13 +283,13 @@ template guarded(handle: uint64, outBuf: ptr TklBuf, body: untyped): int32 =
 
 proc run(
     handle: uint64, data: cstring, length: csize_t, outBuf: ptr TklBuf,
-    reader: QueryHandler = nil, writer: WriterHandler = nil
+    reader: QueryHandler = nil, writer: WriterHandler = nil, packed = false
 ): int32 =
   guarded(handle, outBuf):
     if not validInput(data, length, h.limits.maxBytes):
       Result[string, TklError].err(tklError(InvalidArgument, "InvalidInputBuffer"))
     else:
-      operate(h, bytes(data, length), outBuf, reader, writer)
+      operate(h, bytes(data, length), outBuf, reader, writer, packed)
 
 proc idOf(p: cstring, length: csize_t, limits: ParseLimits): Result[string, TklError] =
   if length == 0 or not validBytes(p, length, limits.maxStringBytes):
@@ -362,6 +375,12 @@ proc queryByChainAddresses(snapshot: Snapshot, request: Request): Result[QueryOu
 
 proc queryByChains(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
   snapshot.byChainsOutput(request.chains, request.offset, request.limit)
+
+proc queryByCrossChainIds(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.byCrossChainIdsOutput(request.crossChainIds))
+
+proc queryBySymbolOnChain(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.bySymbolOnChainOutput(request.chainId, request.symbol)
 
 proc queryAll(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
   snapshot.allOutput(request.offset, request.limit)
@@ -538,6 +557,14 @@ proc tkl_get_by_chains_packed(handle: uint64, chainIds: ptr uint64,
     else:
       packedByChains(h, toOpenArray(cast[ptr UncheckedArray[uint64]](chainIds),
         0, int(count) - 1), outBuf)
+
+proc tkl_get_by_cross_chain_ids_packed(handle: uint64, data: cstring,
+    length: csize_t, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryByCrossChainIds, packed = true)
+
+proc tkl_get_by_symbol_on_chain(handle: uint64, data: cstring, length: csize_t,
+    outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryBySymbolOnChain)
 
 proc tkl_get_all(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =

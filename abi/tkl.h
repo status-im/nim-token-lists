@@ -85,6 +85,17 @@ int32_t tkl_get_by_chains(uint64_t handle, const char* json, size_t len, TklBuf*
 #define TKL_PACKED_RECORD_BYTES 32u
 int32_t tkl_get_by_chains_packed(uint64_t handle, const uint64_t* chainIds,
                                  size_t count, TklBuf* out);
+/* Request {"crossChainIds":["usd-coin",...]}: the tokens whose cross-chain id
+   is one of the non-empty ids, in get_all order, as the packed layout above.
+   For market data, which needs only the keys of tokens sharing an asset. */
+int32_t tkl_get_by_cross_chain_ids_packed(uint64_t handle, const char* json,
+                                          size_t len, TklBuf* out);
+/* Request {"chainId":1,"symbol":"usdc"}: a token page of the chain's tokens
+   whose symbol or name equals `symbol` ignoring ASCII case, in get_by_chains
+   order (legacy payment requests carry only a symbol). An empty symbol is
+   TKL_INVALID_ARGUMENT. */
+int32_t tkl_get_by_symbol_on_chain(uint64_t handle, const char* json, size_t len,
+                                   TklBuf* out);
 int32_t tkl_get_all(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_native(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_list(uint64_t handle, const char* json, size_t len, TklBuf* out);

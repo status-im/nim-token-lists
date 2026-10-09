@@ -14,6 +14,8 @@ _tkl_get_by_keys
 _tkl_get_by_chain_addresses
 _tkl_get_by_chains
 _tkl_get_by_chains_packed
+_tkl_get_by_cross_chain_ids_packed
+_tkl_get_by_symbol_on_chain
 _tkl_get_all
 _tkl_get_native
 _tkl_get_list
