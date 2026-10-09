@@ -205,12 +205,15 @@ proc initViewBuilder*(
 proc addList*(builder: var ViewBuilder, meta: sink TokenList) =
   builder.snapshot.lists.add ListView(meta: meta)
 
-proc addExtra*(builder: var ViewBuilder, token: Token) =
+proc addExtra*(builder: var ViewBuilder, token: Token): Result[void, TklError] =
   ## Appends a native or custom token to the last list.
   let index = builder.snapshot.extra.addToken(token.chainId, token.address,
     token.decimals, token.name, token.symbol, token.logoUri, token.crossChainId,
     token.custom)
-  builder.snapshot.lists[^1].tokens.add TokenRef(index or ExtraRef)
+  if index.isNone:
+    return err(tklError(InvalidArgument, "TooLarge", "custom"))
+  builder.snapshot.lists[^1].tokens.add TokenRef(index.get or ExtraRef)
+  ok()
 
 proc addDiagnostic*(builder: var ViewBuilder, error: TklError) =
   let runs = addr builder.snapshot.diagnostics

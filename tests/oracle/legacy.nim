@@ -110,12 +110,12 @@ proc legacyParse*(
     if format == StandardFormat:
       let row = ?decodeDocument(string(raw), StandardRow, limits, sourceId)
       source.rows.add store.addToken(row.chainId, row.address, row.decimals,
-        row.name, row.symbol, row.logoURI, "")
+        row.name, row.symbol, row.logoURI, "").get
     else:
       let row = ?decodeDocument(string(raw), StatusRow, limits, sourceId)
       for contract in seq[Contract](row.contracts):
         source.rows.add store.addToken(contract.chainId, contract.address,
-          row.decimals, row.name, row.symbol, row.logoURI, row.crossChainId)
+          row.decimals, row.name, row.symbol, row.logoURI, row.crossChainId).get
         source.rowNumbers.add uint32(index)
   ok(source)
 
