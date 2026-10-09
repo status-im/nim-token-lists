@@ -311,10 +311,34 @@ func (h *Handle) GetByChainsPacked(chains []uint64, dst []ChainToken) ([]ChainTo
 	}
 	var out C.TklBuf
 	rc := C.tkl_get_by_chains_packed(h.h, (*C.uint64_t)(unsafe.SliceData(chains)), C.size_t(len(chains)), &out)
-	if rc != 0 {
-		return dst[:0], 0, statusError(rc, takeBuf(&out))
+	return decodePacked(rc, &out, dst)
+}
+
+// GetByCrossChainIDsPacked answers the tokens whose cross-chain id is one of
+// the non-empty ids, in GetAll order, as ChainTokens without JSON output. It
+// fills dst like GetByChainsPacked.
+func (h *Handle) GetByCrossChainIDsPacked(ids []string, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if h == nil {
+		return dst[:0], 0, InvalidHandle
 	}
-	defer C.tkl_buf_free(&out)
+	data, err := json.Marshal(struct {
+		CrossChainIDs []string `json:"crossChainIds,omitempty"`
+	}{ids})
+	if err != nil {
+		return dst[:0], 0, err
+	}
+	var out C.TklBuf
+	p, n := bytesArg(data)
+	rc := C.tkl_get_by_cross_chain_ids_packed(h.h, p, n, &out)
+	return decodePacked(rc, &out, dst)
+}
+
+// decodePacked releases a packed answer after decoding it into dst.
+func decodePacked(rc C.int32_t, out *C.TklBuf, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if rc != 0 {
+		return dst[:0], 0, statusError(rc, takeBuf(out))
+	}
+	defer C.tkl_buf_free(out)
 	const header, record = C.TKL_PACKED_HEADER_BYTES, C.TKL_PACKED_RECORD_BYTES
 	data := unsafe.Slice((*byte)(unsafe.Pointer(out.data)), int(out.len))
 	if len(data) < header || binary.LittleEndian.Uint32(data) != C.TKL_PACKED_MAGIC {
@@ -335,6 +359,18 @@ func (h *Handle) GetByChainsPacked(chains []uint64, dst []ChainToken) ([]ChainTo
 		dst[i].Decimals = r[28]
 	}
 	return dst, binary.LittleEndian.Uint64(data[8:]), nil
+}
+
+// GetBySymbolOnChain answers the chain's tokens whose symbol or name equals
+// symbol ignoring ASCII case, in GetByChains order: legacy payment requests
+// name a token only by symbol.
+func (h *Handle) GetBySymbolOnChain(chainID uint64, symbol string) (Page[Token], error) {
+	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
+		return C.tkl_get_by_symbol_on_chain(handle, data, length, out)
+	}, struct {
+		ChainID uint64 `json:"chainId"`
+		Symbol  string `json:"symbol"`
+	}{chainID, symbol})
 }
 
 func (h *Handle) GetList(id string) (Page[TokenList], error) {
