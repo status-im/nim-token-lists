@@ -23,7 +23,7 @@ type
       ## List metadata; `tokens` stays empty.
     tokens: seq[TokenRef]
 
-  Snapshot* = object
+  Snapshot* {.byref.} = object
     revisionValue: uint64
     base: StoreRef
     extra: TokenStore

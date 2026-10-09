@@ -4,6 +4,7 @@
 ## interned byte arena. Build tables are dropped by `freeze`; a frozen store is
 ## immutable and may be shared between snapshots and reader threads.
 
+import std/typetraits
 import ./[types, jsonout, hashing]
 export types, jsonout
 
@@ -27,7 +28,7 @@ type
     reserved: uint8
     symbol*, name*, logo*, crossChainId*: TextId
 
-  TokenStore* = object
+  TokenStore* {.byref.} = object
     bytes: seq[char]
     ends: seq[uint32]
     prefixes: seq[TextId]
@@ -398,6 +399,7 @@ proc copyRecord*(
   Opt.some(store.addRecord(record))
 
 proc trim[T](values: var seq[T]) =
+  static: doAssert supportsCopyMem(T)
   if values.capacity > values.len:
     var exact = newSeq[T](values.len)
     if values.len > 0:
