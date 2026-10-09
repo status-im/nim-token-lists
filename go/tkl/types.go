@@ -43,10 +43,12 @@ type Diagnostic struct {
 	Detail   string `json:"detail,omitempty"`
 	SourceID string `json:"sourceId,omitempty"`
 }
+
+// ListContent is the identity and fetch metadata of a list document. Bodies
+// travel separately and the library never retains them.
 type ListContent struct {
 	ID               string      `json:"id"`
 	Format           string      `json:"format,omitempty"`
-	Body             string      `json:"body"`
 	Source           string      `json:"source,omitempty"`
 	FetchedTimestamp string      `json:"fetchedTimestamp,omitempty"`
 	ETag             string      `json:"etag,omitempty"`
@@ -67,13 +69,12 @@ type Policy struct {
 	NativeTokens  []Token    `json:"nativeTokens,omitempty"`
 }
 type Config struct {
-	Chains           []uint64      `json:"chains,omitempty"`
-	MainListID       string        `json:"mainListId,omitempty"`
-	RegistryID       string        `json:"registryId,omitempty"`
-	RegistryURL      string        `json:"registryUrl,omitempty"`
-	EmbeddedRegistry string        `json:"embeddedRegistry,omitempty"`
-	InitialLists     []ListContent `json:"initialLists,omitempty"`
-	Policy           Policy        `json:"policy"`
+	Chains       []uint64      `json:"chains,omitempty"`
+	MainListID   string        `json:"mainListId,omitempty"`
+	RegistryID   string        `json:"registryId,omitempty"`
+	RegistryURL  string        `json:"registryUrl,omitempty"`
+	InitialLists []ListContent `json:"initialLists,omitempty"`
+	Policy       Policy        `json:"policy"`
 }
 type Limits struct {
 	MaxBytes         int `json:"maxBytes"`
@@ -82,10 +83,28 @@ type Limits struct {
 	MaxObjectMembers int `json:"maxObjectMembers"`
 	MaxStringBytes   int `json:"maxStringBytes"`
 }
+
+// Bootstrap describes the host's persisted state; Stored is the metadata of
+// its persisted lists and registry.
 type Bootstrap struct {
-	Contents []ListContent `json:"contents,omitempty"`
-	Customs  []Token       `json:"customs,omitempty"`
-	State    RefreshState  `json:"state"`
+	Stored  []ListContent `json:"stored,omitempty"`
+	Customs []Token       `json:"customs,omitempty"`
+	State   RefreshState  `json:"state"`
+}
+
+// BodyOrigin says which copy of a list a load body is.
+type BodyOrigin uint32
+
+const (
+	Bundled BodyOrigin = 0
+	Stored  BodyOrigin = 1
+)
+
+// ListBody is one list document to load. Data is only borrowed for the call.
+type ListBody struct {
+	ID     string
+	Origin BodyOrigin
+	Data   []byte
 }
 type Change struct {
 	Revision uint64   `json:"revision"`
@@ -105,10 +124,13 @@ type FetchRequest struct {
 	ETag   string `json:"etag"`
 	Format string `json:"format"`
 }
+
+// FetchResult is one fetched response. Body is passed to the library on its
+// own and only borrowed for that call; it is not part of the JSON envelope.
 type FetchResult struct {
 	ID      string      `json:"id"`
 	Status  int         `json:"status,omitempty"`
-	Body    string      `json:"body,omitempty"`
+	Body    []byte      `json:"-"`
 	ETag    string      `json:"etag,omitempty"`
 	Failure *Diagnostic `json:"failure,omitempty"`
 }

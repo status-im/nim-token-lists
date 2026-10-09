@@ -1,23 +1,25 @@
 import std/[unittest, strutils, sequtils]
-import tokenlists/core/catalogue
+import tokenlists/api
 
 const
   ListBody = """{"name":"List","timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokens":[{"chainId":1,"address":"0x0000000000000000000000000000000000000001","name":"One","symbol":"ONE","decimals":18}]}"""
   RegistryBody = """{"timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokenLists":[{"id":"main","sourceUrl":"https://example.org/main","schema":"standard"}]}"""
 
-proc fresh(): Catalogue =
-  initCatalogue(CatalogueConfig(chains: @[1'u64], mainListId: "main",
-    registryId: "registry", registryUrl: "https://example.org/registry",
-    initialLists: @[ListContent(id: "main", body: ListBody)])).get
+let config = CatalogueConfig(chains: @[1'u64], mainListId: "main",
+  registryId: "registry", registryUrl: "https://example.org/registry",
+  initialLists: @[ListContent(id: "main")])
 
-proc registryResult(body = RegistryBody): FetchResult =
-  FetchResult(id: "registry", status: 200, body: body, etag: "r1")
+proc fresh(): Catalogue =
+  initCatalogue(config, [SourceBody(id: "main", origin: BundledBody, body: ListBody)]).get
+
+proc registryResult(body = RegistryBody): FetchedBody =
+  FetchedBody(id: "registry", status: 200, body: body, etag: "r1")
 
 proc complete(catalogue: var Catalogue, now = 10'i64) =
   let plan = catalogue.refreshPlan(now, force = true).get
   discard catalogue.refreshApply(plan.id, @[registryResult()], now + 1).get
   discard catalogue.refreshApply(plan.id,
-    @[FetchResult(id: "main", status: 200, body: ListBody, etag: "m1")], now + 2).get
+    @[FetchedBody(id: "main", status: 200, body: ListBody, etag: "m1")], now + 2).get
   discard catalogue.refreshCommit(plan.id, now + 3).get
 
 suite "refresh transactions":
@@ -30,7 +32,7 @@ suite "refresh transactions":
     check more.step == RefreshStep.NeedMore
     check more.requests[0].id == "main"
     let ready = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 200, body: ListBody, etag: "m1")], 12).get
+      @[FetchedBody(id: "main", status: 200, body: ListBody, etag: "m1")], 12).get
     check ready.step == RefreshStep.Ready
     check ready.outcome == RefreshOutcome.Full
     check ready.writes.len == 2
@@ -46,7 +48,7 @@ suite "refresh transactions":
     let plan = catalogue.refreshPlan(10, force = true).get
     discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
     discard catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 200, body: ListBody, etag: "m1")], 12).get
+      @[FetchedBody(id: "main", status: 200, body: ListBody, etag: "m1")], 12).get
     check catalogue.refreshAbort(plan.id, StorageFailure).isOk
     check catalogue.revision == 1
     check catalogue.refreshState.lastSuccess == 0
@@ -81,10 +83,10 @@ suite "refresh transactions":
     let plan = catalogue.refreshPlan(20, force = true).get
     check plan.requests[0].etag == "r1"
     let more = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "registry", status: 304)], 21).get
+      @[FetchedBody(id: "registry", status: 304)], 21).get
     check more.requests[0].etag == "m1"
     let ready = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 200, etag: "m1", body: "ignored")], 22).get
+      @[FetchedBody(id: "main", status: 200, etag: "m1", body: "ignored")], 22).get
     check ready.writes.len == 0
     check ready.outcome == RefreshOutcome.Unchanged
     check ready.sources[1].outcome == SourceOutcome.UnchangedSameEtag
@@ -97,10 +99,10 @@ suite "refresh transactions":
     catalogue.complete()
     let plan = catalogue.refreshPlan(20, force = true).get
     let more = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "registry", failure: tklError(NetworkFailure, "timeout"))], 21).get
+      @[FetchedBody(id: "registry", failure: tklError(NetworkFailure, "timeout"))], 21).get
     check more.step == RefreshStep.NeedMore
     let failed = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 503)], 22).get
+      @[FetchedBody(id: "main", status: 503)], 22).get
     check failed.step == RefreshStep.Failed
     check failed.outcome == RefreshOutcome.Failed
     check catalogue.revision == 2
@@ -111,29 +113,30 @@ suite "refresh transactions":
     var catalogue = fresh()
     let plan = catalogue.refreshPlan(10, force = true).get
     let failed = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "registry", status: 304)], 11).get
+      @[FetchedBody(id: "registry", status: 304)], 11).get
     check failed.step == RefreshStep.Failed
     check failed.diagnostics[0].detail == "RegistryUnavailable"
     var embedded = initCatalogue(CatalogueConfig(chains: @[1'u64],
-      registryId: "registry", registryUrl: "https://example.org/registry",
-      embeddedRegistry: RegistryBody),
-      @[ListContent(id: "registry", body: "broken", format: RegistryFormat)]).get
+      registryId: "registry", registryUrl: "https://example.org/registry"),
+      [SourceBody(id: "registry", origin: StoredBody, body: "broken"),
+        SourceBody(id: "registry", origin: BundledBody, body: RegistryBody)],
+      @[ListContent(id: "registry", format: RegistryFormat)]).get
     let fallback = embedded.refreshPlan(20, force = true).get
     check embedded.refreshApply(fallback.id,
-      @[FetchResult(id: "registry", status: 503)], 21).get.requests[0].id == "main"
+      @[FetchedBody(id: "registry", status: 503)], 21).get.requests[0].id == "main"
 
   test "invalid batches are retryable and apply and commit enforce round order":
     var catalogue = fresh()
     let plan = catalogue.refreshPlan(10, force = true).get
     check catalogue.refreshCommit(plan.id, 11).error.detail == "RefreshNotPrepared"
-    check catalogue.refreshApply(plan.id, @[], 11).isErr
+    check catalogue.refreshApply(plan.id, newSeq[FetchedBody](), 11).isErr
     check catalogue.refreshApply(plan.id, @[registryResult(), registryResult()], 11).isErr
-    check catalogue.refreshApply(plan.id, @[FetchResult(id: "unknown")], 11).isErr
+    check catalogue.refreshApply(plan.id, @[FetchedBody(id: "unknown")], 11).isErr
     discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
     check catalogue.refreshCommit(plan.id, 12).isErr
     discard catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 200, body: ListBody)], 12).get
-    check catalogue.refreshApply(plan.id, @[], 13).error.detail == "RefreshAlreadyApplied"
+      @[FetchedBody(id: "main", status: 200, body: ListBody)], 12).get
+    check catalogue.refreshApply(plan.id, newSeq[FetchedBody](), 13).error.detail == "RefreshAlreadyApplied"
     check catalogue.refreshCommit(plan.id, 13).isOk
 
   test "partial success retains bad and orphaned sources while publishing good data":
@@ -143,11 +146,11 @@ suite "refresh transactions":
       .replace("\"tokenLists\":[", "\"tokenLists\":[{\"id\":\"bad\",\"sourceUrl\":\"https://example.org/bad\",\"schema\":\"unknown\"},")
     let plan = catalogue.refreshPlan(20, force = true).get
     let more = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "registry", status: 200, body: registry, etag: "r2")], 21).get
+      @[FetchedBody(id: "registry", status: 200, body: registry, etag: "r2")], 21).get
     check more.requests.len == 1
     check more.requests[0].id == "new"
     let ready = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "new", status: 200, body: ListBody, etag: "n1")], 22).get
+      @[FetchedBody(id: "new", status: 200, body: ListBody, etag: "n1")], 22).get
     check ready.outcome == RefreshOutcome.Partial
     check ready.writes.len == 2
     discard catalogue.refreshCommit(plan.id, 23).get
@@ -156,8 +159,8 @@ suite "refresh transactions":
     check catalogue.getDiagnostics.items.anyIt(it.detail == "OrphanedSource")
 
   test "malformed and oversized list bodies do not replace previous tokens":
-    for response in [FetchResult(id: "main", status: 200, body: "{}"),
-        FetchResult(id: "main", failure: tklError(NetworkFailure, "tooLarge"))]:
+    for response in [FetchedBody(id: "main", status: 200, body: "{}"),
+        FetchedBody(id: "main", failure: tklError(NetworkFailure, "tooLarge"))]:
       var catalogue = fresh()
       let plan = catalogue.refreshPlan(10, force = true).get
       discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
@@ -174,7 +177,7 @@ suite "refresh transactions":
       let plan = catalogue.refreshPlan(10, force = true).get
       discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
       discard catalogue.refreshApply(plan.id,
-        @[FetchResult(id: "main", status: 200, body: ListBody)], 12).get
+        @[FetchedBody(id: "main", status: 200, body: ListBody)], 12).get
       if policyChange:
         discard catalogue.setPolicy(CataloguePolicy(priority: CustomFirstPriority)).get
       else:
@@ -210,16 +213,15 @@ suite "refresh transactions":
 
   test "bootstrap retains permissively parsed stored content after failed refresh":
     let minimal = """{"tokens":[{"chainId":1,"address":"0x0000000000000000000000000000000000000003","symbol":"STORED","decimals":18}]}"""
-    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64],
-      mainListId: "main", registryId: "registry",
-      registryUrl: "https://example.org/registry",
-      initialLists: @[ListContent(id: "main", body: ListBody)]),
-      @[ListContent(id: "main", body: minimal)]).get
+    var catalogue = initCatalogue(config,
+      [SourceBody(id: "main", origin: StoredBody, body: minimal),
+        SourceBody(id: "main", origin: BundledBody, body: ListBody)],
+      @[ListContent(id: "main")]).get
     check catalogue.getList("main").get.tokens[0].symbol == "STORED"
     let plan = catalogue.refreshPlan(10, force = true).get
     discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
     discard catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 503)], 12).get
+      @[FetchedBody(id: "main", status: 503)], 12).get
     discard catalogue.refreshCommit(plan.id, 13).get
     check catalogue.getList("main").get.tokens[0].symbol == "STORED"
 
@@ -238,7 +240,8 @@ suite "refresh transactions":
     for sameUrl in [false, true]:
       var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64],
         registryId: "registry", registryUrl: "https://example.org/registry"),
-        @[ListContent(id: "registry", body: RegistryBody, etag: "r1",
+        [SourceBody(id: "registry", origin: StoredBody, body: RegistryBody)],
+        @[ListContent(id: "registry", etag: "r1",
           source: (if sameUrl: "https://example.org/registry"
                    else: "https://old.example.org/registry"),
           format: RegistryFormat)]).get
@@ -251,9 +254,9 @@ suite "refresh transactions":
     let revision = catalogue.revision
     let plan = catalogue.refreshPlan(20, force = true).get
     discard catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "registry", status: 200, body: RegistryBody, etag: "r2")], 21).get
+      @[FetchedBody(id: "registry", status: 200, body: RegistryBody, etag: "r2")], 21).get
     let report = catalogue.refreshApply(plan.id,
-      @[FetchResult(id: "main", status: 304)], 22).get
+      @[FetchedBody(id: "main", status: 304)], 22).get
     check report.writes.len == 1
     check report.writes[0].id == "registry"
     check catalogue.refreshCommit(plan.id, 23).get.kind == NoChange
@@ -270,7 +273,7 @@ suite "refresh transactions":
       let plan = catalogue.refreshPlan(now, force = true).get
       discard catalogue.refreshApply(plan.id, @[registryResult()], now).get
       let report = catalogue.refreshApply(plan.id,
-        @[FetchResult(id: "main", status: 200, body: ListBody)], now).get
+        @[FetchedBody(id: "main", status: 200, body: ListBody)], now).get
       for content in report.writes:
         check content.fetchedAt == now
         check content.fetchedTimestamp == expected
@@ -283,7 +286,7 @@ suite "refresh transactions":
     var catalogue = fresh()
     let plan = catalogue.refreshPlan(10, force = true).get
     discard catalogue.refreshApply(plan.id, @[registryResult()], 50).get
-    let response = @[FetchResult(id: "main", status: 200, body: ListBody)]
+    let response = @[FetchedBody(id: "main", status: 200, body: ListBody)]
     check catalogue.refreshApply(plan.id, response, 49).error.detail == "TimeBeforePlan"
     discard catalogue.refreshApply(plan.id, response, 60).get
     check catalogue.refreshCommit(plan.id, 11).error.detail == "TimeBeforePlan"
@@ -292,3 +295,60 @@ suite "refresh transactions":
     check catalogue.refreshState.lastSuccess == 0
     check catalogue.refreshCommit(plan.id, 60).isOk
     check catalogue.refreshState.lastSuccess == 60
+
+  test "apply requires the put body of every changed 200 response":
+    var catalogue = fresh()
+    let plan = catalogue.refreshPlan(10, force = true).get
+    let bare = @[FetchResult(id: "registry", status: 200, etag: "r1")]
+    check catalogue.refreshApply(plan.id, bare, 11).error.detail == "MissingFetchBody"
+    check catalogue.refreshPutBody(plan.id, "registry", RegistryBody).isOk
+    let more = catalogue.refreshApply(plan.id, bare, 11).get
+    check more.step == RefreshStep.NeedMore
+    # A body put for the previous round is not carried into the next one.
+    check catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "main", status: 200, etag: "m1")], 12).error.detail ==
+        "MissingFetchBody"
+    check catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "main", status: 503)], 12).get.outcome == RefreshOutcome.Partial
+
+  test "a put body replaces an earlier one and only the batch decides use":
+    var catalogue = fresh()
+    let plan = catalogue.refreshPlan(10, force = true).get
+    check catalogue.refreshPutBody(plan.id, "registry", "broken").isOk
+    check catalogue.refreshPutBody(plan.id, "registry", RegistryBody).isOk
+    discard catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "registry", status: 200, etag: "r1")], 11).get
+    let changed = ListBody.replace("ONE", "UNO")
+    check catalogue.refreshPutBody(plan.id, "main", changed).isOk
+    let ready = catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "main", status: 200, etag: "m1")], 12).get
+    check ready.outcome == RefreshOutcome.Full
+    check ready.writes.len == 2
+    check ready.writes[1].id == "main"
+    check ready.writes[1].etag == "m1"
+    check ready.writes[1].source == "https://example.org/main"
+    discard catalogue.refreshCommit(plan.id, 13).get
+    check catalogue.getList("main").get.tokens[0].symbol == "UNO"
+
+  test "put rejects unknown plans, requests and stale plans":
+    var catalogue = fresh()
+    let plan = catalogue.refreshPlan(10, force = true).get
+    check catalogue.refreshPutBody(plan.id + 1, "registry", RegistryBody).error.detail ==
+      "UnknownRefreshPlan"
+    check catalogue.refreshPutBody(plan.id, "main", ListBody).error.detail ==
+      "UnexpectedFetchResult"
+    discard catalogue.setChains(@[10'u64]).get
+    check catalogue.refreshPutBody(plan.id, "registry", RegistryBody).error.code ==
+      SupersededPlan
+
+  test "an oversized put body is reported without being parsed":
+    var catalogue = initCatalogue(config,
+      [SourceBody(id: "main", origin: BundledBody, body: ListBody)],
+      limits = ParseLimits(maxBytes: ListBody.len, maxDepth: 64,
+        maxArrayItems: 100, maxObjectMembers: 100, maxStringBytes: 1024)).get
+    let plan = catalogue.refreshPlan(10, force = true).get
+    discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
+    check catalogue.refreshPutBody(plan.id, "main", ListBody & "  ").isOk
+    let ready = catalogue.refreshApply(plan.id,
+      @[FetchResult(id: "main", status: 200, etag: "m2")], 12).get
+    check ready.sources[1].outcome == SourceOutcome.TooLarge

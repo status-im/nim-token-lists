@@ -1,7 +1,7 @@
 NIM ?= nim
 NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcache:build/nimcache-tests
 
-.PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan bench bench-parse bench-catalogue fuzz-core isolate audit clean
+.PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan test-tsan bench bench-parse bench-catalogue fuzz-core isolate audit clean
 lib:
 	NIM="$(NIM)" scripts/build_lib.sh
 .PHONY: lib-android lib-ios test-windows
@@ -28,12 +28,16 @@ test-c: lib
 	build/smoke
 	cc -std=c11 -Wall -Wextra -o build/lengths tests/abi/lengths.c -Iabi build/libtkl.a -lpthread -lm
 	build/lengths
+	cc -std=c11 -Wall -Wextra -o build/transactions tests/abi/transactions.c -Iabi build/libtkl.a -lpthread -lm
+	build/transactions
 test-go: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 ./...
 test-differential: lib
 	cd tests/differential && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -count=1 ./...
 test-asan:
 	NIM="$(NIM)" bash scripts/test_asan.sh
+test-tsan:
+	NIM="$(NIM)" bash scripts/test_tsan.sh
 bench: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -run '^$$' -bench . -benchmem ./...
 isolate: lib

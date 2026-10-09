@@ -13,7 +13,15 @@ type Snapshot* = object
   aliases: Table[string, string]
   skipped: HashSet[string]
 
+type SnapshotRef* = ref Snapshot
+  ## A published snapshot, shared and never mutated. Copying the ref is not
+  ## thread-safe: share it across threads only behind a lock.
+
 func revision*(snapshot: Snapshot): uint64 = snapshot.revisionValue
+
+proc share*(snapshot: sink Snapshot): SnapshotRef =
+  result = SnapshotRef()
+  result[] = snapshot
 
 func initSnapshot*(
     lists: sink seq[TokenList], policy: CataloguePolicy,

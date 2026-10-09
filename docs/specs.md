@@ -29,14 +29,24 @@ by ID, remaining stored lists sorted by ID, then custom tokens. The first
 token with a given chain/address key wins. An explicit custom-first policy
 places custom tokens before curated lists, but after native tokens.
 
-Stored content takes precedence over embedded content. A missing, empty or
-corrupt stored initial list falls back to embedded data; failures are reported
+Stored content takes precedence over bundled content. A missing, empty or
+corrupt stored initial list falls back to the bundled list; failures are reported
 as diagnostics. Invalid remote-only lists are skipped with diagnostics.
-An invalid embedded fallback fails the build without publishing partial state.
+An invalid bundled fallback fails the load without publishing partial state.
 
-Source JSON is decoded once when loading the catalogue. Custom edits and policy
-changes rebuild from cached rows; chain changes re-filter those rows without
-decoding JSON again, including rows on chains that were initially disabled.
+The library ships no list data and retains no list body. A load supplies the
+metadata of the host's persisted lists, then each body once, borrowed only for
+that call: stored and bundled copies of a list share its ID and say which they
+are. Each body is parsed when it is supplied and dropped. A bundled list is
+parsed only while no usable stored copy of it has been supplied, so hosts pass
+stored bodies first. Finishing picks each stored list if it parsed, else its
+bundled list, and publishes once; aborting publishes nothing.
+
+Custom edits and policy changes rebuild from cached rows; chain changes re-filter
+those rows without decoding JSON again, including rows on chains that were
+initially disabled. A refresh parses only the bodies it fetched; every other
+list keeps its parsed rows, including lists that fell back at load, whose
+diagnostics stay until they are fetched again.
 
 Skipped keys affect the unique catalogue, not the retained raw lists.
 Native aliases resolve to a chain's zero-address token unless that alias key
@@ -51,6 +61,7 @@ tokens. Returned values can be modified without changing the source snapshot.
 Direct catalogue query methods borrow the current snapshot and copy only their
 results. The `snapshot` accessor deliberately copies the whole catalogue for
 callers that need to retain it; it should not be used for each hot lookup.
+`published` shares the immutable snapshot itself without copying it.
 
 ## Publication and custom tokens
 
@@ -79,19 +90,32 @@ snapshot acquisition. Once acquired, a value snapshot remains valid across
 later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
-The C adapter keeps published snapshots behind manually owned pointers and holds
-the read lock through queries and result encoding. A separate writer mutex
-serializes core mutation, construction, diffing and candidate ownership. The
-write lock only swaps the published pointer and revision; old state is reclaimed
-after previous readers finish. Core commit checks enforce revision/epoch validity.
+Each publication builds one new immutable snapshot; none is changed afterwards.
+The C adapter publishes the core's snapshot itself, never a copy. Readers borrow
+it under the read lock through queries and result encoding without touching its
+reference count. A separate writer mutex serializes core mutation, construction,
+diffing and candidate ownership, and only writers copy or release the shared
+reference. The write lock only swaps the published reference and revision; the
+replaced snapshot is released after the swap, once no reader can still borrow it.
+Core commit checks enforce revision/epoch validity.
 
 ## C and Go bindings
 
-ABI major 2 replaces the prototype. `tkl_create` accepts an ABI version and a JSON
-object containing `config` and optional `limits`; mismatched versions fail before
-creating a handle. `tkl_load_stored` accepts `contents`, `customs` and `state` and
-publishes revision one. It can succeed only once per handle. Queries before load
-return `InvalidArgument` with `NotLoaded`. Library version is `0.2.0`.
+ABI major 3 replaces version 2, whose create, load and refresh JSON carried list
+bodies. `tkl_create` accepts an ABI version and a JSON object containing `config`
+and optional `limits`; mismatched versions fail before creating a handle. Config
+list entries are metadata only (ID, format, source, fetch metadata).
+
+Loading is a transaction. `tkl_load_begin` accepts `stored` (persisted list and
+registry metadata, including failures), `customs` and `state` and returns a load
+ID. `tkl_load_list` passes one body as a borrowed pointer and length with its
+list ID and origin (`TKL_BODY_BUNDLED` or `TKL_BODY_STORED`); a zero length is
+an empty body. The registry is loaded the same way under the registry ID.
+`tkl_load_finish` publishes revision one and can succeed only once per handle;
+`tkl_load_abort` publishes nothing. A new begin replaces an open load, and
+finish, abort or destroy ends it; a stale load ID is rejected. Unknown IDs,
+origins and repeated bodies are rejected without ending the load. Queries before
+load return `InvalidArgument` with `NotLoaded`. Library version is `0.3.0`.
 
 Every operation other than version, revision, destruction and buffer release
 uses a length-delimited UTF-8 JSON object and a `TklBuf` output. C callers free
@@ -110,7 +134,9 @@ against status codes. Enum strings use their declared Nim names, for example
 | `set_chains`, `set_policy` | `chains`; `policy` | Change |
 | `custom_validate_upsert`, `custom_validate_delete` | `token`; `key` | Mutation |
 | `custom_commit`, `custom_abort` | `mutationId` | Change; true |
-| `refresh_plan`, `refresh_apply` | `now,force`; `planId,results,now` | Plan; report |
+| `load_begin` | `stored,customs,state` | Load ID; no body |
+| `load_list`, `load_finish`, `load_abort` | load ID, list ID, origin, body; load ID | No body; change page; no body |
+| `refresh_plan`, `refresh_put_body`, `refresh_apply` | `now,force`; plan ID, request ID, body; `planId,results,now` | Plan; no body; report |
 | `refresh_commit`, `refresh_abort` | `planId,now`; `planId,reason` | Change; true |
 | `set_auto_refresh`, `set_network_allowed` | `enabled,refreshSec,checkSec`; `allowed` | true |
 | `next_due`, `refresh_state`, `changes_since` | `now`; empty object; `revision` | Nullable timestamp; state; change page |
@@ -119,11 +145,10 @@ Operation names in the header have the `tkl_` prefix. Omitted fields use their
 zero/default values; invalid keys, intervals, transaction IDs and pagination are
 rejected by the core. Queries expose empty tag metadata as an empty JSON object.
 The create envelope is capped at 16 MiB; subsequent envelopes use the instance
-byte limit. Embedded document strings may occupy that envelope budget; original
-document limits, including leaf-string limits, are enforced when parsing them.
-Creation also checks each initial-list body and embedded registry against the
-resolved instance byte limit before allocating a handle. Requests with no fields
-use `{}`; zero-length input remains invalid on the C boundary.
+byte limit. Bodies are not JSON envelopes: each is checked against the instance
+document limits when it is parsed. Requests with no fields use `{}`; zero-length
+JSON input remains invalid on the C boundary. No input pointer, JSON or body, is
+retained after the call returns.
 
 The status-go facade must serve hot per-row and per-event lookups from a
 revision-keyed Go mirror. It must not cross the ABI for each activity row or
@@ -154,17 +179,24 @@ integer seconds in `fetchedAt` and format `fetchedTimestamp` as RFC 3339 UTC
 (for example, `1970-01-01T00:00:12Z`) for list metadata and RPC compatibility.
 Formatting uses the supplied value without consulting the system clock or timezone.
 
-Registry errors fall back to the committed or embedded registry. Without a usable
-registry the refresh fails. Newly fetched documents undergo native validation;
-cached list bodies retain the existing permissive parsing contract. Source URLs
-and formats scope conditional ETags. A 304 requires usable matching cached
-content and a sent ETag; a successful response with that same nonempty ETag
-retains the cached body. Configured initial-list formats cannot be changed by a
-registry. Unsupported formats are reported without requesting those sources.
+Registry errors fall back to the committed or bundled registry, kept parsed.
+Without a usable registry the refresh fails. The host passes the body of each
+200 response of a round with `refresh_put_body` before applying the round; it
+is validated natively and parsed in that call, a later put for the same request
+replaces it, and an oversized body is reported as too large without parsing.
+Results carry no bodies. Applying a round requires a put body for every 200
+response whose ETag differs from the one sent; bodies put for a round are
+dropped once it is applied. Loaded list bodies retain the existing permissive
+parsing contract. Source URLs and formats scope conditional ETags. A 304
+requires usable matching cached content and a sent ETag; a successful response
+with that same nonempty ETag keeps the committed list. Configured initial-list
+formats cannot be changed by a registry. Unsupported formats are reported
+without requesting those sources.
 
 Final reports contain persistence writes, per-source outcomes and an overall
-full, partial, unchanged or failed outcome. Failed sources keep their prior
-content. Sources removed from the registry remain merged and receive orphaned
+full, partial, unchanged or failed outcome. Writes are metadata only: the host
+persists the bytes it fetched under each written ID and supplies them as stored
+bodies at the next load. Failed sources keep their prior content. Sources removed from the registry remain merged and receive orphaned
 diagnostics. Apply builds an unpublished candidate and precomputes its change.
 It parses only lists written by the run; a run that leaves every list and
 diagnostic unchanged skips the rebuild.

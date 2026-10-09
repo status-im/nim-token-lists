@@ -75,9 +75,10 @@ type
     nativeTokens*: seq[Token]
 
   ListContent* = object
+    ## Identity and fetch metadata of a list document. Bodies are never kept;
+    ## they are borrowed only for the call that parses them.
     id*: string
     format*: ListFormat
-    body*: string
     source*: string
     fetchedTimestamp*: string
     etag*: string
@@ -89,9 +90,13 @@ type
     mainListId*: string
     registryId*: string
     registryUrl*: string
-    embeddedRegistry*: string
     initialLists*: seq[ListContent]
     policy*: CataloguePolicy
+
+  BodyOrigin* = enum
+    ## Which copy of a list a load body is: the host's bundled list or the one
+    ## it persisted after a refresh.
+    BundledBody, StoredBody
 
   Page*[T] = object
     revision*: uint64
