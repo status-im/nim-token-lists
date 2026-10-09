@@ -14,7 +14,7 @@ use C bindings to call the Nim implementation.
 - Deterministic catalogue building, immutable query snapshots and revisioned publication.
 - Custom-token prepare, commit and abort operations.
 - Refresh planning, conditional fetch results and transactional publication.
-- Host-driven scheduling and parser/refresh-state fuzz targets.
+- Host-driven scheduling and parser, parser-differential and refresh-state fuzz targets.
 - A production C ABI, typed cgo wrapper and public Nim API.
 
 The core operates on supplied data without network or filesystem access.
@@ -245,6 +245,13 @@ Parsing preserves list metadata and token order. Unsupported chains and invalid
 token rows produce diagnostics. Duplicate token rows are preserved for the
 caller to resolve. Status lists expand each token's contracts in numeric chain
 order and retain the cross-chain ID.
+
+Standard and Status lists are parsed in a single pass over the borrowed body.
+JSON well-formedness, limits, duplicate fields, field types and, for fetched
+documents, validation are checked while rows are written into the store, with
+no intermediate document tree or row strings. The results and error details
+are those of the typed decoder and validator this parser replaced, which
+`tests/oracle/` keeps for differential tests and fuzzing.
 
 Parsing cached or embedded data is separate from validating newly fetched
 documents. Validation checks required metadata, field types and registry
