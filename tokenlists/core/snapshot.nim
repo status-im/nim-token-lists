@@ -147,9 +147,12 @@ func countedCmp(a, b: Identity): int =
   cmp(a, b)
 
 func skips(snapshot: Snapshot, identity: Identity): bool =
-  snapshot.skipped.binarySearch(identity, countedCmp) >= 0
+  snapshot.skipped.len > 0 and
+    snapshot.skipped.binarySearch(identity, countedCmp) >= 0
 
 func aliasIndex(snapshot: Snapshot, identity: Identity): int =
+  if snapshot.aliases.len == 0:
+    return -1
   snapshot.aliases.binarySearch((identity, identity),
     proc(a, b: (Identity, Identity)): int = countedCmp(a[0], b[0]))
 
