@@ -57,8 +57,8 @@ replaces the earlier prototype interface; headers and bindings must match.
 Run `make bench` for Go binding lookup, bulk-read and custom-write benchmarks.
 Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
-Run `make bench-catalogue` to measure custom updates, owned snapshot copies and
-direct lookups using all eight embedded lists in a release build.
+Run `make bench-catalogue` to measure custom updates, owned snapshot copies,
+direct lookups and refreshes using all eight embedded lists in a release build.
 Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser and
 refresh-state fuzz campaigns under AddressSanitizer. For longer campaigns, run
 `bash scripts/fuzz_core.sh parsers -runs=100000` (or use `planner`).

@@ -1,4 +1,4 @@
-import std/[algorithm, monotimes, strformat, times]
+import std/[algorithm, monotimes, sequtils, strformat, times]
 import ../../tokenlists/core/catalogue as catalogueCore
 
 const inputs = [
@@ -51,4 +51,46 @@ when compiles(catalogue.getByKey(key)):
     checksum += uint64(catalogue.getByKey(key).get.symbol.len)
   let nanos = float64((getMonoTime() - started).inNanoseconds) / 100_000
   echo &"direct catalogue lookup: {nanos:.1f} ns/op (100000 iterations)"
+var registry = """{"timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokenLists":["""
+for index, input in inputs:
+  registry.add (if index > 0: "," else: "") & """{"id":"""" & input.id &
+    """","sourceUrl":"https://example.org/""" & input.id & """"}"""
+registry.add "]}"
+var refreshing = initCatalogue(CatalogueConfig(chains: @[1'u64, 10, 8453, 42161],
+  mainListId: "status", registryId: "registry",
+  registryUrl: "https://example.org/registry", initialLists: @inputs)).get
+var now = 1'i64
+
+proc refresh(changed: openArray[FetchResult]): Change =
+  let plan = refreshing.refreshPlan(now, force = true).get
+  var report = refreshing.refreshApply(plan.id,
+    @[FetchResult(id: "registry", status: 200, body: registry, etag: "r")], now).get
+  var responses = @changed
+  for request in report.requests:
+    if request.etag.len > 0 and not responses.anyIt(it.id == request.id):
+      responses.add FetchResult(id: request.id, status: 304)
+  report = refreshing.refreshApply(plan.id, responses, now).get
+  doAssert report.step == RefreshStep.Ready
+  result = refreshing.refreshCommit(plan.id, now).get
+  inc now
+
+var everyList: seq[FetchResult]
+for input in inputs:
+  everyList.add FetchResult(id: input.id, status: 200, body: input.body, etag: "e")
+doAssert refresh(everyList).kind == RefreshChange
+var unchangedRefreshes, oneListRefreshes: seq[float64]
+for index in 0 ..< 20:
+  let started = getMonoTime()
+  doAssert refresh([]).kind == NoChange
+  unchangedRefreshes.add float64((getMonoTime() - started).inNanoseconds) / 1_000_000
+report("refresh, all lists unchanged", unchangedRefreshes)
+for index in 0 ..< 20:
+  # Alternate one list's body so each refresh writes and publishes it.
+  let body = inputs[1].body & (if index mod 2 == 0: " " else: "")
+  let started = getMonoTime()
+  discard refresh([FetchResult(id: inputs[1].id, status: 200, body: body,
+    etag: $index)])
+  oneListRefreshes.add float64((getMonoTime() - started).inNanoseconds) / 1_000_000
+report("refresh, one list changed", oneListRefreshes)
+checksum += refreshing.revision
 echo &"Consumed checksum: {checksum}"
