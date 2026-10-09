@@ -76,6 +76,10 @@ proc readValue*(
     elif negative: -int64(magnitude)
     else: int64(magnitude)
 
+when defined(tklCountParses):
+  # Test-only probe: JSON documents read by the typed decoder.
+  var decodedDocuments* {.threadvar.}: int
+
 proc decodeDocument*[T](
     data: openArray[char], kind: typedesc[T],
     limits: ParseLimits = DefaultParseLimits, sourceId = "", requireFields = false
@@ -83,6 +87,8 @@ proc decodeDocument*[T](
   ## Reads `data` in place for the duration of the call; nothing retains it.
   ## Exceptions are adapted at this boundary.
   mixin readValue
+  when defined(tklCountParses):
+    inc decodedDocuments
   if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
       limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
       limits.maxStringBytes <= 0:

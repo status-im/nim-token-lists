@@ -16,13 +16,28 @@ func resolveFormat*(
   of "registry": ok(RegistryFormat)
   else: err(tklError(UnsupportedSchema, identifier))
 
-proc strictDecode[T](
-    data: openArray[char], kind: typedesc[T], limits: ParseLimits, sourceId: string
-): Result[T, TklError] =
-  let decoded = decodeDocument(data, T, limits, sourceId, requireFields = true)
-  if decoded.isErr:
-    return err(tklError(InvalidContent, decoded.error.detail, sourceId))
-  decoded
+proc validRegistry*(
+    data: openArray[char], sourceId = "", limits = DefaultParseLimits
+): Result[Registry, TklError] =
+  ## A registry that passes the refresh checks, decoded once.
+  template invalid(detail: string): untyped =
+    return err(tklError(InvalidContent, detail, sourceId))
+  let wire = decodeDocument(data, WireRegistry, limits, sourceId,
+    requireFields = true)
+  if wire.isErr:
+    # Malformed JSON keeps its own error; only then is the body re-read.
+    discard ?decodeDocument(data, JsonVoid, limits, sourceId)
+    invalid(wire.error.detail)
+  if not validTimestamp(wire.get.timestamp):
+    invalid("BadTimestamp")
+  var seen: HashSet[string]
+  for source in wire.get.tokenLists:
+    if source.id.len == 0 or source.id in seen:
+      invalid("EmptyOrDuplicateSourceId")
+    if not validUri(source.sourceUrl, source = true):
+      invalid("BadSourceUrl")
+    seen.incl source.id
+  ok(toRegistry(wire.get))
 
 proc validateDocument*(
     data: openArray[char], format: ListFormat, sourceId = "",
@@ -31,20 +46,6 @@ proc validateDocument*(
   ## Required fields and types, not a remote/general JSON Schema interpreter.
   ## Parsers filter individual rows; one unusable token must not reject a list.
   if format == RegistryFormat:
-    # Well-formedness only: materializing the document would copy it.
-    discard ?decodeDocument(data, JsonVoid, limits, sourceId)
-    template invalid(detail: string): untyped =
-      return err(tklError(InvalidContent, detail, sourceId))
-    let registry = ?strictDecode(data, WireRegistry, limits, sourceId)
-    if not validTimestamp(registry.timestamp):
-      invalid("BadTimestamp")
-    var seen: HashSet[string]
-    for source in registry.tokenLists:
-      if source.id.len == 0 or source.id in seen:
-        invalid("EmptyOrDuplicateSourceId")
-      if not validUri(source.sourceUrl, source = true):
-        invalid("BadSourceUrl")
-      seen.incl source.id
+    discard ?validRegistry(data, sourceId, limits)
     return ok()
-
   validateList(data, format, sourceId, limits)
