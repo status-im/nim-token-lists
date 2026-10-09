@@ -29,6 +29,8 @@ type
     chainId: uint64
     chains: seq[uint64]
     keys: seq[string]
+    chainIds: seq[uint64]
+    addresses: seq[string]
     offset, limit: int
     revision, mutationId, planId: uint64
     now, refreshSec, checkSec: int64
@@ -350,6 +352,9 @@ proc queryNative(snapshot: Snapshot, request: Request): Result[string, TklError]
 proc queryByKeys(snapshot: Snapshot, request: Request): Result[string, TklError] =
   encodeResult(snapshot.getByKeys(request.keys))
 
+proc queryByChainAddresses(snapshot: Snapshot, request: Request): Result[string, TklError] =
+  encodeResult(snapshot.getByChainAddresses(request.chainIds, request.addresses))
+
 proc queryByChains(snapshot: Snapshot, request: Request): Result[string, TklError] =
   encodeResult(snapshot.getByChains(request.chains, request.offset, request.limit))
 
@@ -498,6 +503,10 @@ proc tkl_get_by_chain_address(handle: uint64, data: cstring, length: csize_t,
 proc tkl_get_by_keys(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
   run(handle, data, length, outBuf, reader = queryByKeys)
+
+proc tkl_get_by_chain_addresses(handle: uint64, data: cstring, length: csize_t,
+    outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryByChainAddresses)
 
 proc tkl_get_by_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =

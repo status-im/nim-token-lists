@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -234,5 +235,69 @@ func TestQueryOutputParity(t *testing.T) {
 		if golden[i] != r.lines[i] {
 			t.Errorf("output differs:\n got  %s\n want %s", r.lines[i], golden[i])
 		}
+	}
+}
+
+// Batch queries return exactly the items of the matching single lookups.
+func TestBatchQueriesMatchSingleLookups(t *testing.T) {
+	bodies := parityBodies(t)
+	config := Config{Chains: []uint64{1, 10, 42161, 8453, 56, 59144}, MainListID: "status"}
+	config.Policy.NativeAliases = []Identity{{ChainID: 1, Address: weth}}
+	config.Policy.SkippedKeys = []string{"1-" + usdt}
+	var loads []ListBody
+	for _, id := range parityIDs {
+		format := StandardFormat
+		if id == "status" {
+			format = StatusFormat
+		}
+		config.InitialLists = append(config.InitialLists, ListContent{ID: id, Format: format})
+		loads = append(loads, ListBody{ID: id, Origin: Bundled, Data: bodies[id]})
+	}
+	h, err := Create(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	if _, err = h.LoadStored(Bootstrap{}, loads); err != nil {
+		t.Fatal(err)
+	}
+	all, err := h.GetAll(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := []Identity{{ChainID: 1, Address: strings.ToUpper(weth[2:])}, {ChainID: 1, Address: usdt}, {ChainID: 999, Address: weth}}
+	for i := 0; i < len(all.Items); i += 7 {
+		pairs = append(pairs, Identity{ChainID: all.Items[i].ChainID, Address: all.Items[i].Address})
+	}
+	pairs = append(pairs, pairs[3])
+	var keys []string
+	var singles []Token
+	for _, pair := range pairs {
+		keys = append(keys, fmt.Sprintf("%d-%s", pair.ChainID, pair.Address))
+		page, err := h.GetByChainAddress(pair.ChainID, pair.Address)
+		if err == nil {
+			singles = append(singles, page.Items...)
+		}
+	}
+	byPairs, err := h.GetByChainAddresses(pairs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKeys, err := h.GetByKeys(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := json.Marshal(singles)
+	for name, page := range map[string]Page[Token]{"pairs": byPairs, "keys": byKeys} {
+		got, _ := json.Marshal(page.Items)
+		if string(got) != string(want) || page.Total != len(singles) || page.Revision != all.Revision {
+			t.Fatalf("%s: %d items, want %d", name, len(page.Items), len(singles))
+		}
+	}
+	if _, err = h.GetByChainAddresses([]Identity{{ChainID: 1, Address: "0x12"}}); !errors.Is(err, InvalidArgument) {
+		t.Fatal(err)
+	}
+	if page, err := h.GetByChainAddresses(nil); err != nil || page.Total != 0 {
+		t.Fatal(page, err)
 	}
 }

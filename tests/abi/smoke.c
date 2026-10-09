@@ -19,13 +19,23 @@ static void *initialize(void *unused) {
  assert(h==0); tkl_buf_free(&out);
  return NULL;
 }
+/* Outputs are not NUL terminated. */
+static int contains(const TklBuf *out, const char *text) {
+ size_t n=strlen(text);
+ for(size_t i=0;i+n<=out->len;i++) if(memcmp(out->data+i,text,n)==0) return 1;
+ return 0;
+}
 static void *reader(void *unused) {
  (void)unused;
  /* Every short-lived thread must parse at least once, even on a slow runner. */
  do {
   TklBuf out={0};
   assert(tkl_get_native(shared,"{\"chainId\":1}",13,&out)==TKL_OK);
-  assert(out.len>0); tkl_buf_free(&out); atomic_fetch_add(&reads,1);
+  assert(out.len>0); tkl_buf_free(&out);
+  const char *pairs="{\"chainIds\":[1],\"addresses\":[\"0x0000000000000000000000000000000000000000\"]}";
+  assert(tkl_get_by_chain_addresses(shared,pairs,strlen(pairs),&out)==TKL_OK);
+  assert(contains(&out,"\"total\":1,"));
+  tkl_buf_free(&out); atomic_fetch_add(&reads,1);
  } while(!atomic_load(&stop));
  TklBuf out={0};
  const char *bad="{\"chainId\":";
