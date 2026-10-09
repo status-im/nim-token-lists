@@ -76,7 +76,7 @@ suite "direct query encoding":
     check held.listOutput("missing").error.code == NotFound
     check held.allOutput(-1).isErr
 
-  test "control bytes the pinned writer cannot encode are escaped":
+  test "control bytes 0x0f and 0x1f encode as json_serialization writes them":
     var config = CatalogueConfig(chains: @[1'u64])
     let catalogue = initCatalogue(config, customs = @[Token(chainId: 1,
       address: "0x000000000000000000000000000000000000dEaD", symbol: "\x0f",
@@ -85,3 +85,6 @@ suite "direct query encoding":
       "1-0x000000000000000000000000000000000000dead").get.json
     check "\"name\":\"\\u001f\"" in text
     check "\"symbol\":\"\\u000f\"" in text
+    let held = catalogue.published
+    check text == Json.encode(types.Page[Token](revision: held[].revision, total: 1,
+      items: @[held[].getByKey("1-0x000000000000000000000000000000000000dead").get]))

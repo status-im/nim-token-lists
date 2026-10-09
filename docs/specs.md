@@ -118,8 +118,7 @@ Core commit checks enforce revision/epoch validity.
 Query results are written as JSON straight from the token records and the
 string arena into the output buffer handed to the host: one allocation of the
 exact size, measured first, with no intermediate token values. The bytes are
-those of the json_serialization encoding of the materialized page, except that
-control bytes 0x0f and 0x1f are escaped where that writer fails.
+those of the json_serialization encoding of the materialized page.
 
 ## C and Go bindings
 
