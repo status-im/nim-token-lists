@@ -15,7 +15,7 @@ type
     tokenLists*: seq[WireSource]
 
 proc parseRegistry*(
-    data: string, sourceId = "", limits = DefaultParseLimits
+    data: openArray[char], sourceId = "", limits = DefaultParseLimits
 ): Result[Registry, TklError] =
   let wire = ?decodeDocument(data, WireRegistry, limits, sourceId)
   var registry = Registry(timestamp: wire.timestamp, version: wire.version)
