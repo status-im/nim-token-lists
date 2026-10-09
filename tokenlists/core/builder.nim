@@ -143,6 +143,11 @@ proc loadBody*(
     return err(tklError(InvalidArgument, "DuplicateListBody", id))
   target[] = ParsedBody(received: true, bodyLen: body.len,
     parsed: Result[ParsedSource, TklError].err(tklError(Ok, "", id)))
+  let (rows, textBytes) = (sources.store.len, sources.store.textBytes)
+  template grewOnFailure(): bool =
+    # Only rows or texts a failed parse left behind need compaction.
+    target.parsed.isErr and (sources.store.len > rows or
+      sources.store.textBytes > textBytes)
   if origin == StoredBody:
     let content = stored[sources.cached.getOrDefault(id)]
     let format = if id in sources.initial:
@@ -153,11 +158,11 @@ proc loadBody*(
       # A usable stored copy wins; drop a bundled one parsed before it.
       list.bundled.parsed = Result[ParsedSource, TklError].err(tklError(Ok, "", id))
       sources.unreferenced = true
-    sources.unreferenced = sources.unreferenced or target.parsed.isErr
+    sources.unreferenced = sources.unreferenced or grewOnFailure()
   elif not (list.stored.received and list.stored.parsed.isOk):
     let content = config.initialLists[sources.initial.getOrDefault(id)]
     target.parsed = sources.store.parseContent(content, body, content.format, limits)
-    sources.unreferenced = sources.unreferenced or target.parsed.isErr
+    sources.unreferenced = sources.unreferenced or grewOnFailure()
   ok()
 
 proc absorb(
