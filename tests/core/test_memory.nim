@@ -203,6 +203,25 @@ suite "compact catalogue":
     checkpoint $storedFirst.retained & " " & $bundledFirst.retained
     check abs(bundledFirst.retained - storedFirst.retained) < 16 * 1024
 
+  test "a failed parse that adds no rows does not compact the store":
+    let stored = @[ListContent(id: "uniswap", source: "https://example.org/u")]
+    let bundled = fixture("uniswap.json")
+    let broken = '{'.repeat(2)
+    let plain = measure:
+      var load = beginLoad(config, @[]).get
+      load.loadList("uniswap", BundledBody, bundled).get
+      discard finishLoad(move(load)).get
+    var fallback: Catalogue
+    let failed = measure:
+      var retry = beginLoad(config, stored).get
+      retry.loadList("uniswap", StoredBody, broken).get
+      retry.loadList("uniswap", BundledBody, bundled).get
+      fallback = finishLoad(move(retry)).get
+    check fallback.getAll().get.total > 2
+    checkpoint $plain.churn & " " & $failed.churn
+    # Compacting would copy the whole store again (~470 KiB here).
+    check failed.churn - plain.churn < 128 * 1024
+
 suite "single-pass parsing":
   test "a list parse allocates about its own store":
     for id in Ids:
