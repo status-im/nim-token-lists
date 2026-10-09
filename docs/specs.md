@@ -180,6 +180,25 @@ Transfer event: they batch lookups with `get_by_keys`, `get_by_chain_addresses`
 or `get_by_chains` and keep only what one screen or event batch needs.
 `BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode.
 
+`tkl_get_by_chains_packed(handle, chainIds, count, out)` is the one query
+without JSON, for balance fetching, which reads only chain, address and
+decimals of whole chains. It answers the tokens of `get_by_chains` with the same
+chains, in the same order, as fixed little-endian records written straight from
+the store into one exactly sized buffer:
+
+| Bytes | Field |
+| --- | --- |
+| 0..3 | magic `0x31504B54` ("TKP1", layout version 1) |
+| 4..7 | record count, u32 |
+| 8..15 | revision, u64 |
+| 16 + 32i .. | record i: chainId u64, address 20 bytes, decimals u8, 3 zero bytes |
+
+`chainIds` holds `count` u64 ids (NULL with count 0 answers no tokens; at most
+the instance `maxArrayItems`); errors return the usual JSON body. Go's
+`GetByChainsPacked` decodes into a reusable `[]ChainToken`: about 0.12 ms and one
+allocation for six mainnets (11774 tokens) on Apple M1, against 25 ms for
+`GetByChains`.
+
 Handles use a bounded registry with generation counters. Destruction rejects new
 calls, waits for in-flight calls and frees state; stale generations are invalid.
 Calls can originate on arbitrary host threads under ORC/useMalloc. No callbacks
