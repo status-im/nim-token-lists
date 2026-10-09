@@ -34,6 +34,8 @@ type
     chainIds: seq[uint64]
     records: seq[TokenRecord]
     textSlots, recordSlots: seq[uint32]
+    escaped: seq[uint64]
+      ## Bit per text that JSON output must escape.
     frozenValue: bool
 
   StoreRef* = ref TokenStore
@@ -81,7 +83,8 @@ func retainedBytes*(store: TokenStore): int =
   ## Payload bytes of the store's buffers, for memory tests.
   store.bytes.capacity + 4 * (store.ends.capacity + store.prefixes.capacity +
     store.textSlots.capacity + store.recordSlots.capacity) +
-    8 * store.chainIds.capacity + sizeof(TokenRecord) * store.records.capacity
+    8 * (store.chainIds.capacity + store.escaped.capacity) +
+    sizeof(TokenRecord) * store.records.capacity
 
 func mix(hash: uint64, value: uint64): uint64 {.inline.} =
   (hash xor value) * 0x100000001B3'u64
@@ -155,6 +158,13 @@ proc intern*(store: var TokenStore, text: openArray[char]): TextId =
   store.bytes.setLen(start + text.len)
   copyMem(addr store.bytes[start], unsafeAddr text[0], text.len)
   store.ends.add uint32(store.bytes.len)
+  let id = store.ends.len - 1
+  if store.escaped.len <= id shr 6:
+    store.escaped.setLen((id shr 6) + 1)
+  for ch in text:
+    if ch < ' ' or ch == '"' or ch == '\\':
+      store.escaped[id shr 6] = store.escaped[id shr 6] or (1'u64 shl (id and 63))
+      break
   result = TextId(uint32(store.ends.len - 1))
   store.textSlots[slot] = uint32(result)
 
@@ -351,6 +361,7 @@ proc freeze*(store: var TokenStore) =
   store.records.trim()
   store.chainIds.trim()
   store.prefixes.trim()
+  store.escaped.trim()
   store.frozenValue = true
 
 func sameToken*(a: TokenStore, ai: uint32, b: TokenStore, bi: uint32): bool =
@@ -395,8 +406,13 @@ func token*(store: TokenStore, index: uint32): Token =
     logoUri: store.logo(record), custom: CustomToken in record.flags)
 
 proc writeText(sink: var JsonSink, store: TokenStore, id: TextId) {.inline.} =
+  let index = int(uint32(id))
   let (first, last) = store.span(id)
-  sink.addEscaped(store.bytes.toOpenArray(first, last - 1))
+  if index shr 6 >= store.escaped.len or
+      (store.escaped[index shr 6] and (1'u64 shl (index and 63))) == 0:
+    sink.add store.bytes.toOpenArray(first, last - 1)
+  else:
+    sink.addEscaped(store.bytes.toOpenArray(first, last - 1))
 
 proc writeToken*(sink: var JsonSink, store: TokenStore, index: uint32) =
   ## The JSON of `token(index)`, written from the record and the arena.
@@ -404,8 +420,11 @@ proc writeToken*(sink: var JsonSink, store: TokenStore, index: uint32) =
   sink.add "{\"chainId\":"
   sink.addUint(store.chainIds[record.chain])
   sink.add ",\"address\":\"0x"
-  for value in record.address:
-    sink.add HexPairs[value]
+  let hex = sink.reserve(40)
+  if not hex.isNil:
+    for index, value in record.address:
+      hex[2 * index] = HexPairs[value][0]
+      hex[2 * index + 1] = HexPairs[value][1]
   sink.add "\",\"crossChainId\":\""
   sink.writeText(store, record.crossChainId)
   sink.add "\",\"decimals\":"

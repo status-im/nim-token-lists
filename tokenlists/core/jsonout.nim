@@ -29,6 +29,13 @@ proc add*(sink: var JsonSink, text: openArray[char]) {.inline.} =
     copyMem(addr sink.data[sink.len], unsafeAddr text[0], text.len)
   sink.len += text.len
 
+proc reserve*(sink: var JsonSink, count: int): ptr UncheckedArray[char] =
+  ## Room for `count` bytes the caller fills, or nil when measuring.
+  if not sink.data.isNil:
+    doAssert sink.len + count <= sink.capacity
+    result = cast[ptr UncheckedArray[char]](addr sink.data[sink.len])
+  sink.len += count
+
 proc addUint*(sink: var JsonSink, value: uint64) =
   var digits: array[20, char]
   var rest = value
