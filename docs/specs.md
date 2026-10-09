@@ -180,7 +180,7 @@ JSON input remains invalid on the C boundary. No input pointer, JSON or body, is
 retained after the call returns.
 
 The library is the single owner of the query index; hosts keep no mirror of it.
-A typed per-call lookup costs roughly 7 microseconds on Apple M2 hardware, mostly
+A typed per-call lookup costs roughly 5 microseconds on Apple M1 Max, mostly
 cgo and request JSON, so hosts must not cross the ABI for each activity row or
 Transfer event: they batch lookups with `get_by_keys`, `get_by_chain_addresses`
 or `get_by_chains` and keep only what one screen or event batch needs.
@@ -202,7 +202,7 @@ the store into one exactly sized buffer:
 `chainIds` holds `count` u64 ids (NULL with count 0 answers no tokens; at most
 the instance `maxArrayItems`); errors return the usual JSON body. Go's
 `GetByChainsPacked` decodes into a reusable `[]ChainToken`: about 0.12 ms and one
-allocation for six mainnets (11774 tokens) on Apple M1, against 25 ms for
+allocation for six mainnets (11774 tokens) on the same machine, against 25 ms for
 `GetByChains`.
 
 Handles use a bounded registry with generation counters. Destruction rejects new
