@@ -8,17 +8,27 @@ import (
 )
 
 func benchmarkCatalogue(b *testing.B) *Handle {
-	b.Helper()
+	h := loadEmbedded(b, []uint64{1, 10, 8453, 42161})
+	all, err := h.GetAll(0, 0)
+	if err != nil || all.Total != 8404 {
+		b.Fatal(all.Total, err)
+	}
+	return h
+}
+
+// loadEmbedded loads the eight embedded lists with chains enabled.
+func loadEmbedded(tb testing.TB, chains []uint64) *Handle {
+	tb.Helper()
 	files, err := filepath.Glob("../../fixtures/embedded/*.json")
 	if err != nil || len(files) != 8 {
-		b.Fatal(files, err)
+		tb.Fatal(files, err)
 	}
-	config := Config{Chains: []uint64{1, 10, 8453, 42161}, MainListID: "status"}
+	config := Config{Chains: chains, MainListID: "status"}
 	var bodies []ListBody
 	for _, file := range files {
 		body, err := os.ReadFile(file)
 		if err != nil {
-			b.Fatal(err)
+			tb.Fatal(err)
 		}
 		id := strings.TrimSuffix(filepath.Base(file), ".json")
 		format := StandardFormat
@@ -30,15 +40,11 @@ func benchmarkCatalogue(b *testing.B) *Handle {
 	}
 	h, err := Create(config)
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
-	b.Cleanup(func() { _ = h.Destroy() })
+	tb.Cleanup(func() { _ = h.Destroy() })
 	if _, err = h.LoadStored(Bootstrap{}, bodies); err != nil {
-		b.Fatal(err)
-	}
-	all, err := h.GetAll(0, 0)
-	if err != nil || all.Total != 8404 {
-		b.Fatal(all.Total, err)
+		tb.Fatal(err)
 	}
 	return h
 }
