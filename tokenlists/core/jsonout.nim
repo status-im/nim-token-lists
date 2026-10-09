@@ -56,8 +56,7 @@ proc addInt*(sink: var JsonSink, value: int64) =
     sink.addUint(uint64(value))
 
 proc addEscaped*(sink: var JsonSink, text: openArray[char]) =
-  ## String content as json_serialization writes it. Bytes 0x0f and 0x1f are
-  ## written in full, where its writer indexes past its hex table.
+  ## String content as json_serialization writes it.
   var run = 0
   for index, ch in text:
     if ch >= ' ' and ch != '"' and ch != '\\':
