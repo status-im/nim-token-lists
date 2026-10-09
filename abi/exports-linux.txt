@@ -11,6 +11,7 @@ tkl_set_policy
 tkl_get_by_key
 tkl_get_by_chain_address
 tkl_get_by_keys
+tkl_get_by_chain_addresses
 tkl_get_by_chains
 tkl_get_all
 tkl_get_native

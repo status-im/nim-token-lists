@@ -143,7 +143,8 @@ against status codes. Enum strings use their declared Nim names, for example
 | Operations | Request fields | Result |
 | --- | --- | --- |
 | `get_by_key`, `get_by_chain_address`, `get_native` | `key`; `chainId,address`; `chainId` | Token page with one item |
-| `get_by_keys`, `get_by_chains`, `get_all` | `keys`; `chains,offset,limit`; `offset,limit` | Token page |
+| `get_by_keys`, `get_by_chain_addresses` | `keys`; `chainIds,addresses` (equal lengths) | Token page in request order |
+| `get_by_chains`, `get_all` | `chains,offset,limit`; `offset,limit` | Token page |
 | `get_list`, `get_lists`, `get_diagnostics` | `id`; empty object; empty object | List or diagnostic page |
 | `set_chains`, `set_policy` | `chains`; `policy` | Change |
 | `custom_validate_upsert`, `custom_validate_delete` | `token`; `key` | Mutation |
@@ -164,14 +165,12 @@ document limits when it is parsed. Requests with no fields use `{}`; zero-length
 JSON input remains invalid on the C boundary. No input pointer, JSON or body, is
 retained after the call returns.
 
-The status-go facade must serve hot per-row and per-event lookups from a
-revision-keyed Go mirror. It must not cross the ABI for each activity row or
-Transfer event. A changed revision triggers a bulk `get_all(0,0)` read and atomic
-mirror replacement; mutations and refresh coordination continue through C.
-Typed per-call lookup measured roughly 7–9 microseconds on Apple M2 hardware,
-including cgo and JSON costs, so the mirror is a requirement for the facade.
-`BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode needed
-for mirror refresh. The mirror itself belongs to the subsequent integration phase.
+The library is the single owner of the query index; hosts keep no mirror of it.
+A typed per-call lookup costs roughly 7 microseconds on Apple M2 hardware, mostly
+cgo and request JSON, so hosts must not cross the ABI for each activity row or
+Transfer event: they batch lookups with `get_by_keys`, `get_by_chain_addresses`
+or `get_by_chains` and keep only what one screen or event batch needs.
+`BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode.
 
 Handles use a bounded registry with generation counters. Destruction rejects new
 calls, waits for in-flight calls and frees state; stale generations are invalid.
