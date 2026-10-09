@@ -33,7 +33,7 @@ type
     prefixes: seq[TextId]
     chainIds: seq[uint64]
     records: seq[TokenRecord]
-    textSlots, recordSlots: seq[uint32]
+    textSlots, recordSlots, chainSlots: seq[uint32]
     escaped: seq[uint64]
       ## Bit per text that JSON output must escape.
     frozenValue: bool
@@ -82,7 +82,8 @@ func identity*(store: TokenStore, record: TokenRecord): Identity =
 func retainedBytes*(store: TokenStore): int =
   ## Payload bytes of the store's buffers, for memory tests.
   store.bytes.capacity + 4 * (store.ends.capacity + store.prefixes.capacity +
-    store.textSlots.capacity + store.recordSlots.capacity) +
+    store.textSlots.capacity + store.recordSlots.capacity +
+    store.chainSlots.capacity) +
     8 * (store.chainIds.capacity + store.escaped.capacity) +
     sizeof(TokenRecord) * store.records.capacity
 
@@ -229,11 +230,34 @@ func sameLogo(a: TokenStore, ar: TokenRecord, b: TokenStore, br: TokenRecord): b
       return false
   true
 
+func hashChain(chainId: uint64): uint64 {.inline.} =
+  ## splitmix64: ids differing only in high bits still spread over slots.
+  result = (chainId xor (chainId shr 30)) * 0xBF58476D1CE4E5B9'u64
+  result = (result xor (result shr 27)) * 0x94D049BB133111EB'u64
+  result = result xor (result shr 31)
+
+proc rehashChains(store: var TokenStore) =
+  store.chainSlots = newSeq[uint32](max(16, store.chainSlots.len * 2))
+  let mask = uint64(store.chainSlots.len - 1)
+  for index, chainId in store.chainIds:
+    var slot = hashChain(chainId) and mask
+    while store.chainSlots[slot] != 0:
+      slot = (slot + 1) and mask
+    store.chainSlots[slot] = uint32(index + 1)
+
 proc chainIndex(store: var TokenStore, chainId: uint64): uint32 =
-  for index in countdown(store.chainIds.high, 0):
+  doAssert not store.frozenValue
+  if store.chainSlots.len < 2 * (store.chainIds.len + 1):
+    store.rehashChains()
+  let mask = uint64(store.chainSlots.len - 1)
+  var slot = hashChain(chainId) and mask
+  while store.chainSlots[slot] != 0:
+    let index = store.chainSlots[slot] - 1
     if store.chainIds[index] == chainId:
-      return uint32(index)
+      return index
+    slot = (slot + 1) and mask
   store.chainIds.add chainId
+  store.chainSlots[slot] = uint32(store.chainIds.len)
   uint32(store.chainIds.high)
 
 func hexValue(ch: char): int =
@@ -356,6 +380,7 @@ proc freeze*(store: var TokenStore) =
   ## Drops the build tables and spare capacity; the store becomes read-only.
   store.textSlots = @[]
   store.recordSlots = @[]
+  store.chainSlots = @[]
   store.bytes.trim()
   store.ends.trim()
   store.records.trim()
