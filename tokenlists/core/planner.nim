@@ -2,7 +2,7 @@
 
 import std/[sets, tables, times]
 import ./[types, validators]
-import ./parsers/[registry, standard, status]
+import ./parsers/[lists, registry]
 export types
 
 const
@@ -27,9 +27,9 @@ type
     format*: ListFormat
 
   FetchResult* = object
+    ## Bodies of 200 responses are passed separately with `putBody`.
     id*: string
     status*: int
-    body*: string
     etag*: string
     failure*: TklError
 
@@ -58,16 +58,32 @@ type
     hasSuccess*: bool
     hasAttempt*: bool
 
+  RegistryContent* = object
+    ## A registry parsed from a borrowed body, with its fetch metadata.
+    meta*: ListContent
+    registry*: Registry
+
   PlanPhase = enum
     Idle, RegistryRound, ListRound, Prepared
+
+  ReceivedBody = object
+    ## A fetched body validated and parsed in the call that borrowed it.
+    id: string
+    bodyLen: int
+    tooLarge: bool
+    error: TklError
+    source: ParsedSource
+    registry: Registry
 
   Planner* = object
     config: CatalogueConfig
     limits: ParseLimits
     contents: seq[ListContent]
-    registry: ListContent
+    registry: Opt[RegistryContent]
     candidate: seq[ListContent]
-    candidateRegistry: ListContent
+    candidateRegistry: Opt[RegistryContent]
+    received: seq[ReceivedBody]
+    updates: seq[ParsedContent]
     phase: PlanPhase
     plan: RefreshPlan
     baseRevision, baseEpoch, nextId: uint64
@@ -78,62 +94,45 @@ type
     lastSeen: int64
 
 func state*(planner: Planner): RefreshState = planner.state
-func preparedContents*(planner: Planner): seq[ListContent] = planner.candidate
+func preparedContents*(planner: Planner): lent seq[ListContent] = planner.candidate
 
-func findContent(contents: seq[ListContent], id: string): Opt[ListContent] =
-  for content in contents:
+proc takeUpdates*(planner: var Planner): seq[ParsedContent] =
+  ## Lists parsed by the prepared run, moved out for the candidate build.
+  move(planner.updates)
+
+func findContent(contents: seq[ListContent], id: string): int =
+  for index, content in contents:
     if content.id == id:
-      return Opt.some(content)
-  Opt.none(ListContent)
+      return index
+  -1
 
-proc putContent(contents: var seq[ListContent], content: ListContent) =
-  for entry in contents.mitems:
-    if entry.id == content.id:
-      entry = content
-      return
-  contents.add content
+proc putContent(contents: var seq[ListContent], content: sink ListContent) =
+  let index = contents.findContent(content.id)
+  if index >= 0:
+    contents[index] = content
+  else:
+    contents.add content
 
 proc initPlanner*(
-    config: CatalogueConfig, stored: seq[ListContent], limits: ParseLimits,
+    config: CatalogueConfig, contents: sink seq[ListContent],
+    registry: sink Opt[RegistryContent], limits: ParseLimits,
     state = RefreshState(), timeoutSec = 300'i64
 ): Result[Planner, TklError] =
+  ## `contents` is the metadata of every usable list the catalogue was built
+  ## from; `registry` the usable stored or bundled registry, if any.
   if timeoutSec <= 0 or state.lastSuccess < 0 or state.lastAttempt < 0:
     return err(tklError(InvalidArgument, "InvalidRefreshState"))
-  var planner = Planner(config: config, limits: limits, nextId: 1,
+  ok(Planner(config: config, limits: limits, nextId: 1,
     networkAllowed: true, refreshSec: 1800, checkSec: 180,
-    timeoutSec: timeoutSec, state: state)
-  for content in config.initialLists:
-    planner.contents.putContent(content)
-  for content in stored:
-    if content.id == config.registryId and config.registryId.len > 0:
-      if validateDocument(content.body, RegistryFormat, content.id, limits).isOk:
-        planner.registry = content
-    elif content.failure.code == Ok:
-      var storedContent = content
-      for initial in config.initialLists:
-        if initial.id == content.id:
-          storedContent.format = initial.format
-      let valid = case storedContent.format
-        of StandardFormat:
-          decodeStandardSource(content.body, content.id, limits).isOk
-        of StatusFormat:
-          decodeStatusSource(content.body, content.id, limits).isOk
-        of RegistryFormat: false
-      if valid:
-        planner.contents.putContent(storedContent)
-  if planner.registry.body.len == 0 and config.embeddedRegistry.len > 0:
-    ?validateDocument(config.embeddedRegistry, RegistryFormat,
-      config.registryId, limits)
-    planner.registry = ListContent(id: config.registryId,
-      source: config.registryUrl, body: config.embeddedRegistry,
-      format: RegistryFormat)
-  ok(planner)
+    timeoutSec: timeoutSec, state: state, contents: contents, registry: registry))
 
 proc clearPlan(planner: var Planner) =
   planner.phase = Idle
   planner.plan = RefreshPlan()
   planner.candidate = @[]
-  planner.candidateRegistry = ListContent()
+  planner.candidateRegistry = Opt.none(RegistryContent)
+  planner.received = @[]
+  planner.updates = @[]
   planner.report = RefreshReport()
 
 proc setNetworkAllowed*(planner: var Planner, allowed: bool) =
@@ -191,8 +190,10 @@ proc startPlan*(
     expiresAt: now + planner.timeoutSec,
     requests: @[FetchRequest(id: planner.config.registryId,
       url: planner.config.registryUrl,
-      etag: (if planner.registry.source == planner.config.registryUrl and
-        planner.registry.format == RegistryFormat: planner.registry.etag else: ""),
+      etag: (if planner.registry.isSome and
+        planner.registry.get.meta.source == planner.config.registryUrl and
+        planner.registry.get.meta.format == RegistryFormat:
+          planner.registry.get.meta.etag else: ""),
       format: RegistryFormat)])
   inc planner.nextId
   planner.phase = RegistryRound
@@ -238,44 +239,108 @@ proc formatFetchedTime(now: int64): string =
   let zone = newTimezone("UTC", utcTime, utcTime)
   fromUnix(now).inZone(zone).format(FetchedTimeFormat)
 
+proc putBody*(
+    planner: var Planner, id: uint64, requestId: string, body: openArray[char],
+    revision, epoch: uint64
+): Result[void, TklError] =
+  ## Validates and parses one fetched body of the current round while it is
+  ## borrowed. Only the parsed result is kept until `applyResults`.
+  if id == 0 or planner.phase == Idle or id != planner.plan.id:
+    return err(tklError(InvalidArgument, "UnknownRefreshPlan"))
+  if planner.phase == Prepared:
+    return err(tklError(InvalidArgument, "RefreshAlreadyApplied"))
+  if revision != planner.baseRevision or epoch != planner.baseEpoch:
+    planner.clearPlan()
+    return err(tklError(SupersededPlan, "RefreshSuperseded"))
+  var format = Opt.none(ListFormat)
+  for request in planner.plan.requests:
+    if request.id == requestId:
+      format = Opt.some(request.format)
+  if format.isNone:
+    return err(tklError(InvalidArgument, "UnexpectedFetchResult", requestId))
+  var received = ReceivedBody(id: requestId, bodyLen: body.len)
+  if body.len > planner.limits.maxBytes:
+    received.tooLarge = true
+  else:
+    let valid = validateDocument(body, format.get, requestId, planner.limits)
+    if valid.isErr:
+      received.error = valid.error
+    elif format.get == RegistryFormat:
+      let parsed = parseRegistry(body, requestId, planner.limits)
+      if parsed.isErr: received.error = parsed.error
+      else: received.registry = parsed.get
+    else:
+      var parsed = parseListBody(body, format.get, requestId, planner.limits)
+      if parsed.isErr: received.error = parsed.error
+      else: received.source = move(parsed.value)
+  for entry in planner.received.mitems:
+    if entry.id == requestId:
+      entry = move(received)
+      return ok()
+  planner.received.add move(received)
+  ok()
+
+func findReceived(planner: Planner, id: string): int =
+  for index, entry in planner.received:
+    if entry.id == id:
+      return index
+  -1
+
+func needsBody(request: FetchRequest, response: FetchResult): bool =
+  response.failure.code == Ok and response.status == 200 and
+    not (response.etag.len > 0 and response.etag == request.etag)
+
 proc acceptResponse(
     planner: var Planner, request: FetchRequest, response: FetchResult, now: int64
 ): SourceReport =
-  let previous = if request.format == RegistryFormat:
-      (if planner.registry.body.len > 0: Opt.some(planner.registry)
-       else: Opt.none(ListContent))
-    else: findContent(planner.contents, request.id)
+  var previousSource = Opt.none(ListContent)
+  if request.format == RegistryFormat:
+    if planner.registry.isSome:
+      previousSource = Opt.some(planner.registry.get.meta)
+  else:
+    let index = planner.contents.findContent(request.id)
+    if index >= 0:
+      previousSource = Opt.some(planner.contents[index])
+  let received = planner.findReceived(request.id)
   template rejected(kind: SourceOutcome, code: TklStatus, detail: string): untyped =
     return SourceReport(id: request.id, outcome: kind,
       error: tklError(code, detail, request.id))
-  if response.body.len > planner.limits.maxBytes or
+  if (received >= 0 and planner.received[received].tooLarge and
+      response.failure.code == Ok and response.status == 200) or
       response.failure.detail == "tooLarge":
     rejected(SourceOutcome.TooLarge, InvalidContent, "TooLarge")
   if response.failure.code != Ok:
     return SourceReport(id: request.id, outcome: SourceOutcome.FetchFailed,
       error: tklError(response.failure.code, response.failure.detail, request.id))
-  let sameSource = previous.isSome and previous.get.source == request.url and
-    previous.get.format == request.format
+  let sameSource = previousSource.isSome and
+    previousSource.get.source == request.url and
+    previousSource.get.format == request.format
   if response.status == 304:
-    if previous.isNone or not sameSource or request.etag.len == 0:
+    if previousSource.isNone or not sameSource or request.etag.len == 0:
       rejected(SourceOutcome.FetchFailed, NetworkFailure, "Unexpected304")
     return SourceReport(id: request.id, outcome: SourceOutcome.Unchanged304)
   if response.status != 200:
     rejected(SourceOutcome.FetchFailed, NetworkFailure, "HttpStatus")
   if sameSource and response.etag.len > 0 and response.etag == request.etag:
     return SourceReport(id: request.id, outcome: SourceOutcome.UnchangedSameEtag)
-  let valid = validateDocument(response.body, request.format, request.id, planner.limits)
-  if valid.isErr:
+  let body = addr planner.received[received]
+  if body.error.code != Ok:
     return SourceReport(id: request.id, outcome: SourceOutcome.InvalidContent,
-      error: valid.error)
+      error: body.error)
   let content = ListContent(id: request.id, source: request.url,
-    body: response.body, etag: response.etag, format: request.format,
+    etag: response.etag, format: request.format,
     fetchedAt: now, fetchedTimestamp: formatFetchedTime(now))
   planner.report.writes.add content
   if request.format == RegistryFormat:
-    planner.candidateRegistry = content
+    planner.candidateRegistry = Opt.some(RegistryContent(meta: content,
+      registry: move(body.registry)))
   else:
+    var update = ParsedContent(meta: content, source: move(body.source),
+      bodyLen: body.bodyLen)
+    update.source.list.source = content.source
+    update.source.list.fetchedTimestamp = content.fetchedTimestamp
     planner.candidate.putContent(content)
+    planner.updates.add move(update)
   SourceReport(id: request.id, outcome: SourceOutcome.Updated)
 
 proc finishReport(planner: var Planner): RefreshReport =
@@ -292,7 +357,7 @@ proc finishReport(planner: var Planner): RefreshReport =
     elif planner.report.writes.len == 0: RefreshOutcome.Unchanged
     else: RefreshOutcome.Full
   if planner.report.outcome == RefreshOutcome.Failed:
-    var report = planner.report
+    var report = move(planner.report)
     report.step = RefreshStep.Failed
     planner.state.lastOutcome = RefreshOutcome.Failed
     planner.clearPlan()
@@ -310,46 +375,50 @@ proc applyResults*(
   if planner.phase notin {RegistryRound, ListRound}:
     return err(tklError(InvalidArgument, "RefreshAlreadyApplied"))
   # Validate the entire batch before changing candidate state. Order is irrelevant.
-  var byId: Table[string, FetchResult]
-  for response in responses:
+  var byId: Table[string, int]
+  for index, response in responses:
     if response.id in byId:
       return err(tklError(InvalidArgument, "DuplicateFetchResult", response.id))
-    byId[response.id] = response
+    byId[response.id] = index
   if byId.len != planner.plan.requests.len:
     return err(tklError(InvalidArgument, "IncompleteFetchResults"))
   for request in planner.plan.requests:
     if request.id notin byId:
       return err(tklError(InvalidArgument, "UnexpectedFetchResult"))
+    if needsBody(request, responses[byId.getOrDefault(request.id)]) and
+        planner.findReceived(request.id) < 0:
+      return err(tklError(InvalidArgument, "MissingFetchBody", request.id))
   for request in planner.plan.requests:
     planner.report.sources.add planner.acceptResponse(request,
-      byId.getOrDefault(request.id), now)
+      responses[byId.getOrDefault(request.id)], now)
+  planner.received = @[]
   if planner.phase == ListRound:
     return ok(planner.finishReport())
-  if planner.candidateRegistry.body.len == 0:
+  if planner.candidateRegistry.isNone:
     let report = RefreshReport(step: RefreshStep.Failed,
       outcome: RefreshOutcome.Failed, sources: planner.report.sources,
       diagnostics: @[tklError(InvalidContent, "RegistryUnavailable")])
     planner.state.lastOutcome = RefreshOutcome.Failed
     planner.clearPlan()
     return ok(report)
-  let registry = ?parseRegistry(planner.candidateRegistry.body,
-    planner.config.registryId, planner.limits)
   var requests: seq[FetchRequest]
   var present: HashSet[string]
-  for source in registry.tokenLists:
+  for source in planner.candidateRegistry.get.registry.tokenLists:
     present.incl source.id
     let format = resolveFormat(source.schema, planner.fallbackFormat(source.id))
-    let initial = findContent(planner.config.initialLists, source.id)
+    let initial = planner.config.initialLists.findContent(source.id)
     if source.id in ["native", "custom", planner.config.registryId] or
         format.isErr or (format.isOk and (format.get == RegistryFormat or
-          (initial.isSome and initial.get.format != format.get))):
+          (initial >= 0 and planner.config.initialLists[initial].format != format.get))):
       planner.report.sources.add SourceReport(id: source.id,
         outcome: SourceOutcome.UnsupportedSchema,
         error: tklError(UnsupportedSchema, "UnsupportedSource", source.id))
       continue
-    let previous = findContent(planner.contents, source.id)
-    let etag = if previous.isSome and previous.get.source == source.sourceUrl and
-        previous.get.format == format.get: previous.get.etag else: ""
+    let previous = planner.contents.findContent(source.id)
+    let etag = if previous >= 0 and
+        planner.contents[previous].source == source.sourceUrl and
+        planner.contents[previous].format == format.get:
+          planner.contents[previous].etag else: ""
     requests.add FetchRequest(id: source.id, url: source.sourceUrl,
       etag: etag, format: format.get)
   for content in planner.contents:

@@ -14,6 +14,7 @@ func benchmarkCatalogue(b *testing.B) *Handle {
 		b.Fatal(files, err)
 	}
 	config := Config{Chains: []uint64{1, 10, 8453, 42161}, MainListID: "status"}
+	var bodies []ListBody
 	for _, file := range files {
 		body, err := os.ReadFile(file)
 		if err != nil {
@@ -24,14 +25,15 @@ func benchmarkCatalogue(b *testing.B) *Handle {
 		if id == "status" {
 			format = StatusFormat
 		}
-		config.InitialLists = append(config.InitialLists, ListContent{ID: id, Format: format, Body: string(body)})
+		config.InitialLists = append(config.InitialLists, ListContent{ID: id, Format: format})
+		bodies = append(bodies, ListBody{ID: id, Origin: Bundled, Data: body})
 	}
 	h, err := Create(config)
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = h.Destroy() })
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, bodies); err != nil {
 		b.Fatal(err)
 	}
 	all, err := h.GetAll(0, 0)

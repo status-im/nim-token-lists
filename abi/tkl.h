@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define TKL_ABI_VERSION 2u
+#define TKL_ABI_VERSION 3u
 enum {
   TKL_OK = 0,
   TKL_NOT_FOUND = 1,
@@ -26,6 +26,8 @@ enum {
   TKL_ABI_MISMATCH = 16,
   TKL_INTERNAL = 17
 };
+/* Which copy of a list a load body is. */
+enum { TKL_BODY_BUNDLED = 0, TKL_BODY_STORED = 1 };
 /* Owned malloc buffer, not NUL terminated. Always free with tkl_buf_free,
    including on errors. Pass an empty output; never overwrite a live buffer.
    No caller pointers are retained. All functions are safe on foreign threads.
@@ -33,11 +35,10 @@ enum {
 typedef struct TklBuf { uint8_t* data; size_t len; size_t cap; } TklBuf;
 uint32_t tkl_abi_version(void);
 int32_t tkl_lib_version(TklBuf* out);
-/* Config: {"config": CatalogueConfig, "limits"?: ParseLimits}.
+/* Config: {"config": CatalogueConfig, "limits"?: ParseLimits}. List entries
+   are metadata only; no list body is ever retained by the library.
    Create's JSON envelope is bounded to 16 MiB. Limits default when omitted.
-   Each initialLists body and embeddedRegistry must fit limits.maxBytes;
-   oversized embedded documents are rejected before allocating a handle.
-   A created handle has revision zero; load_stored publishes revision one. */
+   A created handle has revision zero; load_finish publishes revision one. */
 int32_t tkl_create(uint32_t abiVer, const char* json, size_t len,
                    uint64_t* outHandle, TklBuf* error);
 /* Destroy rejects new calls, drains in-flight calls and invalidates generation.
@@ -50,7 +51,18 @@ int32_t tkl_destroy(uint64_t handle);
    Queries return {revision,total,items}; limit=0 means all.
    Mutations return Change or a prepare/refresh report. Void calls return true.
    The host must serialize persistence+commit against competing mutations. */
-int32_t tkl_load_stored(uint64_t handle, const char* json, size_t len, TklBuf* out);
+/* Load: begin with {"stored": [ListContent], "customs": [Token], "state":
+   RefreshState}, then pass each body (stored ones first) and finish once.
+   Bodies are parsed during load_list and never retained; len 0 is an empty
+   body. A new begin, finish (even failed), abort or destroy ends the load and
+   its id is rejected afterwards. Begin, list and abort return no output body
+   on success; finish returns the bootstrap change page. */
+int32_t tkl_load_begin(uint64_t handle, const char* json, size_t len,
+                       uint64_t* outTxn, TklBuf* out);
+int32_t tkl_load_list(uint64_t handle, uint64_t txn, const char* id, size_t idLen,
+                      uint32_t origin, const char* body, size_t bodyLen, TklBuf* out);
+int32_t tkl_load_finish(uint64_t handle, uint64_t txn, TklBuf* out);
+int32_t tkl_load_abort(uint64_t handle, uint64_t txn, TklBuf* out);
 int32_t tkl_set_chains(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_set_policy(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_by_key(uint64_t handle, const char* json, size_t len, TklBuf* out);
@@ -67,6 +79,13 @@ int32_t tkl_custom_validate_delete(uint64_t handle, const char* json, size_t len
 int32_t tkl_custom_commit(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_custom_abort(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_refresh_plan(uint64_t handle, const char* json, size_t len, TklBuf* out);
+/* Pass the body of each 200 response of the current round before applying
+   it; it is validated and parsed in this call and never retained. Results
+   carry no bodies, and report writes are metadata: the host persists the
+   bytes it fetched under each write's id. Returns no output body on success. */
+int32_t tkl_refresh_put_body(uint64_t handle, uint64_t planId, const char* id,
+                             size_t idLen, const char* body, size_t bodyLen,
+                             TklBuf* out);
 int32_t tkl_refresh_apply(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_refresh_commit(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_refresh_abort(uint64_t handle, const char* json, size_t len, TklBuf* out);

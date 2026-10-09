@@ -2,7 +2,10 @@ _tkl_abi_version
 _tkl_lib_version
 _tkl_create
 _tkl_destroy
-_tkl_load_stored
+_tkl_load_begin
+_tkl_load_list
+_tkl_load_finish
+_tkl_load_abort
 _tkl_set_chains
 _tkl_set_policy
 _tkl_get_by_key
@@ -19,6 +22,7 @@ _tkl_custom_validate_delete
 _tkl_custom_commit
 _tkl_custom_abort
 _tkl_refresh_plan
+_tkl_refresh_put_body
 _tkl_refresh_apply
 _tkl_refresh_commit
 _tkl_refresh_abort

@@ -16,7 +16,7 @@ case "$target" in
     remote="/data/local/tmp/libtkl-tests-$$"
     "$adb" "${selector[@]}" shell mkdir "$remote"
     trap '"$adb" "${selector[@]}" shell rm -r "$remote"' EXIT
-    for test in smoke lengths tkl.test; do
+    for test in smoke lengths transactions tkl.test; do
       "$adb" "${selector[@]}" push "$out/$test" "$remote/$test"
       "$adb" "${selector[@]}" shell chmod 700 "$remote/$test"
       "$adb" "${selector[@]}" shell "$remote/$test"
@@ -29,7 +29,7 @@ case "$target" in
     actual="$(uname -m)"
     [ "$actual" = "$expected" ] || { echo "Expected $expected simulator, got $actual" >&2; exit 1; }
     out="$(cd "$out" && pwd)"
-    for test in smoke lengths tkl.test; do
+    for test in smoke lengths transactions tkl.test; do
       codesign --force --sign - "$out/$test"
       xcrun simctl spawn "$SIMULATOR_UDID" "$out/$test"
     done
