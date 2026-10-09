@@ -382,6 +382,68 @@ func byChainAddressesOutput*(
   output.total = output.selected.len
   ok(output)
 
+proc byCrossChainIdsOutput*(
+    snapshot: Snapshot, ids: openArray[string]
+): QueryOutput =
+  ## The tokens whose cross-chain id is one of the non-empty `ids`, in
+  ## `allOutput` order.
+  result = snapshot.output(TokenOutput, 0)
+  var size = 16
+  while size < 2 * ids.len:
+    size *= 2
+  var slots = newSeq[uint32](size)
+  let mask = uint64(size - 1)
+  for index, id in ids:
+    if id.len == 0:
+      continue
+    var slot = hashText(id) and mask
+    while slots[slot] != 0 and ids[slots[slot] - 1] != id:
+      slot = (slot + 1) and mask
+    slots[slot] = uint32(index + 1)
+  if ids.allIt(it.len == 0):
+    return
+  # Per store and text: 0 unknown, 1 no match, 2 match. Tokens of one asset
+  # share an interned id, so each distinct text is hashed once.
+  var seen: array[2, seq[uint8]]
+  for reference in snapshot.tokens:
+    let store = snapshot.storeOf(reference)
+    let id = store[].record(reference.indexOf).crossChainId
+    if id == EmptyText:
+      continue
+    let side = int((uint32(reference) and ExtraRef) != 0)
+    if seen[side].len == 0:
+      seen[side] = newSeq[uint8](store[].textCount)
+    let text = int(uint32(id))
+    if seen[side][text] == 0:
+      seen[side][text] = 1
+      var slot = store[].hashOf(id) and mask
+      while slots[slot] != 0:
+        if store[].textEquals(id, ids[slots[slot] - 1]):
+          seen[side][text] = 2
+          break
+        slot = (slot + 1) and mask
+    if seen[side][text] == 2:
+      result.selected.add reference
+  result.total = result.selected.len
+
+func bySymbolOnChainOutput*(
+    snapshot: Snapshot, chainId: uint64, symbol: openArray[char]
+): Result[QueryOutput, TklError] =
+  ## The chain's tokens whose symbol or name equals `symbol` ignoring ASCII
+  ## case, in `byChainsOutput` order.
+  if symbol.len == 0:
+    return err(tklError(InvalidArgument, "BadSymbol"))
+  var output = snapshot.output(TokenOutput, 0)
+  for reference in snapshot.tokens:
+    let store = snapshot.storeOf(reference)
+    let record = unsafeAddr store[].record(reference.indexOf)
+    if store[].chainId(record[]) == chainId and
+        (store[].equalsIgnoreAsciiCase(record.symbol, symbol) or
+        store[].equalsIgnoreAsciiCase(record.name, symbol)):
+      output.selected.add reference
+  output.total = output.selected.len
+  ok(output)
+
 func listOutput*(snapshot: Snapshot, id: string): Result[QueryOutput, TklError] =
   for index, list in snapshot.lists:
     if list.meta.id == id:
@@ -519,30 +581,60 @@ proc putLe(data: ptr UncheckedArray[byte], at: int, value: uint64, size: int) {.
   for index in 0 ..< size:
     data[at + index] = byte((value shr (8 * index)) and 0xFF)
 
+proc putHeader(data: ptr UncheckedArray[byte], size: int, revision: uint64): int =
+  let count = (size - PackedHeaderBytes) div PackedRecordBytes
+  doAssert size == PackedHeaderBytes + count * PackedRecordBytes
+  data.putLe(0, PackedMagic, 4)
+  data.putLe(4, uint64(count), 4)
+  data.putLe(8, revision, 8)
+  PackedHeaderBytes
+
+proc putRecord(data: ptr UncheckedArray[byte], at: int, chainId: uint64,
+    record: TokenRecord) {.inline.} =
+  data.putLe(at, chainId, 8)
+  copyMem(addr data[at + 8], unsafeAddr record.address[0], 20)
+  data[at + 28] = record.decimals
+  zeroMem(addr data[at + 29], 3)
+
 proc writePacked*(
     snapshot: Snapshot, chains: openArray[uint64],
     data: ptr UncheckedArray[byte], size: int
 ) =
   ## Writes the `size` = `packedLen` bytes of the chains' tokens, in
   ## `byChainsOutput` order, as little-endian records without strings.
-  let count = (size - PackedHeaderBytes) div PackedRecordBytes
-  doAssert size == PackedHeaderBytes + count * PackedRecordBytes
-  data.putLe(0, PackedMagic, 4)
-  data.putLe(4, uint64(count), 4)
-  data.putLe(8, snapshot.revisionValue, 8)
-  var at = PackedHeaderBytes
+  var at = data.putHeader(size, snapshot.revisionValue)
   for reference in snapshot.tokens:
     let store = snapshot.storeOf(reference)
     let record = unsafeAddr store[].record(reference.indexOf)
     let chainId = store[].chainId(record[])
     if chainId in chains:
       doAssert at < size
-      data.putLe(at, chainId, 8)
-      copyMem(addr data[at + 8], unsafeAddr record.address[0], 20)
-      data[at + 28] = record.decimals
-      zeroMem(addr data[at + 29], 3)
+      data.putRecord(at, chainId, record[])
       at += PackedRecordBytes
   doAssert at == size
+
+func packedLen*(output: QueryOutput): int =
+  ## Bytes of a token output in the packed layout.
+  doAssert output.kind == TokenOutput
+  PackedHeaderBytes + output.references.len * PackedRecordBytes
+
+proc writePacked*(output: QueryOutput, data: ptr UncheckedArray[byte], size: int) =
+  ## Writes the `size` = `packedLen` bytes of a token output's items, in order.
+  var at = data.putHeader(size, output.snapshot.revisionValue)
+  for reference in output.references:
+    let store = output.snapshot[].storeOf(reference)
+    let record = unsafeAddr store[].record(reference.indexOf)
+    doAssert at < size
+    data.putRecord(at, store[].chainId(record[]), record[])
+    at += PackedRecordBytes
+  doAssert at == size
+
+proc packed*(output: QueryOutput): seq[byte] =
+  result = newSeq[byte](output.packedLen)
+  output.writePacked(cast[ptr UncheckedArray[byte]](addr result[0]), result.len)
+
+proc packedByCrossChainIds*(snapshot: Snapshot, ids: openArray[string]): seq[byte] =
+  snapshot.byCrossChainIdsOutput(ids).packed
 
 proc packedByChains*(snapshot: Snapshot, chains: openArray[uint64]): seq[byte] =
   result = newSeq[byte](snapshot.packedLen(chains))
@@ -602,6 +694,14 @@ func getByChainAddresses*(
 ): Result[Page[Token], TklError] =
   ## The same batch as parallel arrays, which the C ABI decodes cheaply.
   ok((?snapshot.byChainAddressesOutput(chainIds, addresses)).tokenPage)
+
+proc getByCrossChainIds*(snapshot: Snapshot, ids: openArray[string]): Page[Token] =
+  snapshot.byCrossChainIdsOutput(ids).tokenPage
+
+func getBySymbolOnChain*(
+    snapshot: Snapshot, chainId: uint64, symbol: string
+): Result[Page[Token], TklError] =
+  ok((?snapshot.bySymbolOnChainOutput(chainId, symbol)).tokenPage)
 
 func materialize(snapshot: Snapshot, list: ListView): TokenList =
   result = list.meta
