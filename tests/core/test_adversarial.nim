@@ -1,6 +1,7 @@
 ## Hostile list shapes cost work linear in their size. Work is counted as
 ## table probes and sort comparisons (-d:tklCountProbes), not timed.
 import std/[strutils, unittest]
+import tokenlists/api
 import ../../tokenlists/core/[types, store, hashing]
 import ../../tokenlists/core/parsers/stream
 import ../oracle/legacy
@@ -169,3 +170,29 @@ suite "adversarial list shapes":
         if not expected:
           check parsed.error.detail == "TooLarge"
       check validateList(body, StatusFormat, "src", capped).isOk == expected
+
+  test "skipped keys and aliases cost a search per token":
+    const Count = 10_000
+    var body = """{"name":"L","timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokens":["""
+    var policy = CataloguePolicy()
+    for index in 0 ..< Count:
+      let address = "0x" & toHex(index + 1, 40)
+      if index > 0: body.add ','
+      body.add """{"chainId":1,"address":"""" & address & """","name":"N","symbol":"S","decimals":6}"""
+      if index mod 2 == 0:
+        policy.skippedKeys.add "1-" & address.toLowerAscii
+        policy.skippedKeys.add "2-" & address.toLowerAscii
+      elif index mod 3 == 0:
+        policy.nativeAliases.add TokenIdentity(chainId: 1, address: address)
+    body.add "]}"
+    let config = CatalogueConfig(chains: @[1'u64], mainListId: "main",
+      initialLists: @[ListContent(id: "main")])
+    var catalogue = initCatalogue(config,
+      [SourceBody(id: "main", origin: BundledBody, body: body)]).get
+    probes = 0
+    discard catalogue.setPolicy(policy).get
+    check probes < 40 * Count
+    check catalogue.getAll().get.total == Count div 2 + 1
+    check catalogue.getByKey("1-0x" & toHex(1, 40).toLowerAscii).isErr
+    check catalogue.getByKey("1-0x" & toHex(4, 40).toLowerAscii).get.address ==
+      NativeAddress
