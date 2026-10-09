@@ -95,7 +95,7 @@ proc fillOutput(outBuf: ptr TklBuf, output: QueryOutput): bool =
   let size = output.jsonLen
   let mem = cMalloc(csize_t(max(size, 1)))
   if mem.isNil: return false
-  output.writeJson(cast[ptr UncheckedArray[char]](mem))
+  output.writeJson(cast[ptr UncheckedArray[char]](mem), size)
   outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(max(size, 1)))
   true
 

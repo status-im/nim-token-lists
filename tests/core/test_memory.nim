@@ -252,3 +252,16 @@ suite "direct query encoding":
     let lists = measure:
       text = snapshot[].listsOutput.json
     check lists.churn < text.len + 64 * 1024
+
+suite "compact diagnostics":
+  test "rows on a disabled chain cost no per-row diagnostic":
+    let (config, bodies) = embedded()
+    var catalogue = loadAll(config, bodies)
+    let before = catalogue.getDiagnostics().total
+    let narrowed = measure:
+      discard catalogue.setChains(@[1'u64, 10, 42161, 8453, 59144]).get
+    let diagnostics = catalogue.getDiagnostics()
+    check diagnostics.total > before + 3000
+    check diagnostics.items[^1].sourceId.len > 0
+    checkpoint "retained " & $narrowed.retained
+    check narrowed.retained < 64 * 1024

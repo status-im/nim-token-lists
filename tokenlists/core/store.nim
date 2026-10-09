@@ -363,17 +363,27 @@ func sameToken*(a: TokenStore, ai: uint32, b: TokenStore, bi: uint32): bool =
     a.sameText(ar.symbol, b, br.symbol) and a.sameText(ar.name, b, br.name) and
     a.sameText(ar.crossChainId, b, br.crossChainId) and a.sameLogo(ar, b, br)
 
+type RowFault* = enum
+  ## Why a parsed row cannot be published, in SDK check order.
+  NoFault, AddressFault, ChainFault, DecimalsFault
+
+func rowFault*(record: TokenRecord, chainEnabled: bool): RowFault =
+  if BadAddress in record.flags: AddressFault
+  elif not chainEnabled: ChainFault
+  elif BadDecimals in record.flags: DecimalsFault
+  else: NoFault
+
+func faultError*(fault: RowFault, sourceId: string): TklError =
+  case fault
+  of NoFault: tklError(Ok, "", sourceId)
+  of AddressFault: tklError(ValidationFailed, "BadAddress", sourceId)
+  of ChainFault: tklError(UnsupportedChain, "UnsupportedChain", sourceId)
+  of DecimalsFault: tklError(ValidationFailed, "DecimalsTooLarge", sourceId)
+
 func rowFailure*(
     record: TokenRecord, chainEnabled: bool, sourceId: string
 ): TklError =
-  ## Why a parsed row cannot be published, in SDK check order.
-  if BadAddress in record.flags:
-    tklError(ValidationFailed, "BadAddress", sourceId)
-  elif not chainEnabled:
-    tklError(UnsupportedChain, "UnsupportedChain", sourceId)
-  elif BadDecimals in record.flags:
-    tklError(ValidationFailed, "DecimalsTooLarge", sourceId)
-  else: tklError(Ok, "", sourceId)
+  faultError(rowFault(record, chainEnabled), sourceId)
 
 func token*(store: TokenStore, index: uint32): Token =
   ## Materializes one record for callers that need a `Token` value.

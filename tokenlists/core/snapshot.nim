@@ -9,6 +9,15 @@ type
     ## A record of the shared store, or with `ExtraRef` set, of the
     ## snapshot's own small store of native and custom tokens.
 
+  DiagnosticRun = object
+    ## `count` equal consecutive diagnostics. Row faults name their list by
+    ## index instead of holding a copy of its id.
+    error: TklError
+    list: int32
+      ## The list whose id is the source, or -1 for `error.sourceId`.
+    fault: RowFault
+    count: int32
+
   ListView = object
     meta: TokenList
       ## List metadata; `tokens` stays empty.
@@ -23,7 +32,8 @@ type
       ## Unique visible tokens: first occurrence of each key, in list order.
     sorted: seq[uint32]
       ## Positions in `tokens` ordered by identity, for binary search.
-    diagnostics: seq[TklError]
+    diagnostics: seq[DiagnosticRun]
+    diagnosticCount: int
     aliases: seq[(Identity, Identity)]
     skipped: seq[Identity]
 
@@ -48,6 +58,7 @@ func detached*(snapshot: Snapshot): Snapshot =
   result = Snapshot(revisionValue: snapshot.revisionValue,
     extra: snapshot.extra, lists: snapshot.lists, tokens: snapshot.tokens,
     sorted: snapshot.sorted, diagnostics: snapshot.diagnostics,
+    diagnosticCount: snapshot.diagnosticCount,
     aliases: snapshot.aliases, skipped: snapshot.skipped)
   if not snapshot.base.isNil:
     result.base = StoreRef()
@@ -189,34 +200,47 @@ proc addExtra*(builder: var ViewBuilder, token: Token) =
     token.custom)
   builder.snapshot.lists[^1].tokens.add TokenRef(index or ExtraRef)
 
-proc addRows*(
-    builder: var ViewBuilder, rows: openArray[uint32],
-    diagnostics: var seq[TklError]
-) =
+proc addDiagnostic*(builder: var ViewBuilder, error: TklError) =
+  let runs = addr builder.snapshot.diagnostics
+  inc builder.snapshot.diagnosticCount
+  if runs[].len > 0 and runs[^1].list < 0 and runs[^1].error == error:
+    inc runs[^1].count
+  else:
+    runs[].add DiagnosticRun(error: error, list: -1, count: 1)
+
+proc addFault(builder: var ViewBuilder, fault: RowFault) =
+  ## A row fault of the last list.
+  let runs = addr builder.snapshot.diagnostics
+  let list = int32(builder.snapshot.lists.high)
+  inc builder.snapshot.diagnosticCount
+  if runs[].len > 0 and runs[^1].list == list and runs[^1].fault == fault:
+    inc runs[^1].count
+  else:
+    runs[].add DiagnosticRun(error: faultError(fault, ""), list: list,
+      fault: fault, count: 1)
+
+proc addRows*(builder: var ViewBuilder, rows: openArray[uint32]) =
   ## Appends the rows of a parsed list that are visible on the enabled chains
   ## to the last list; the others are reported in row order.
   let store = addr builder.snapshot.base[]
-  let list = addr builder.snapshot.lists[^1]
   var visible = 0
   for row in rows:
     let record = store[].record(row)
     if record.flags == {} and builder.enabled[record.chain]:
       inc visible
-  list.tokens = newSeqOfCap[TokenRef](visible)
+  builder.snapshot.lists[^1].tokens = newSeqOfCap[TokenRef](visible)
   for row in rows:
     let record = store[].record(row)
-    let failure = rowFailure(record, builder.enabled[record.chain], list.meta.id)
-    if failure.code != Ok:
-      diagnostics.add failure
+    let fault = rowFault(record, builder.enabled[record.chain])
+    if fault != NoFault:
+      builder.addFault(fault)
     else:
-      list.tokens.add TokenRef(row)
+      builder.snapshot.lists[^1].tokens.add TokenRef(row)
 
 proc finish*(
-    builder: sink ViewBuilder, policy: CataloguePolicy,
-    diagnostics: sink seq[TklError]
+    builder: sink ViewBuilder, policy: CataloguePolicy
 ): Result[Snapshot, TklError] =
   var snapshot = move(builder.snapshot)
-  snapshot.diagnostics = diagnostics
   snapshot.extra.freeze()
   for key in policy.skippedKeys:
     snapshot.skipped.add ?parseIdentity(key)
@@ -329,7 +353,7 @@ func listsOutput*(snapshot: Snapshot): QueryOutput =
   (result.first, result.last, result.windowed) = (0, snapshot.lists.high, true)
 
 func diagnosticsOutput*(snapshot: Snapshot): QueryOutput =
-  result = snapshot.output(DiagnosticOutput, snapshot.diagnostics.len)
+  result = snapshot.output(DiagnosticOutput, snapshot.diagnosticCount)
   (result.first, result.last, result.windowed) =
     (0, snapshot.diagnostics.high, true)
 
@@ -377,14 +401,21 @@ proc writeList(sink: var JsonSink, snapshot: Snapshot, list: ListView) =
     sink.writeReference(snapshot, reference)
   sink.add "]}"
 
-proc writeError(sink: var JsonSink, error: TklError) =
-  sink.add "{\"code\":"
-  sink.addString($error.code)
-  sink.add ",\"detail\":"
-  sink.addString(error.detail)
-  sink.add ",\"sourceId\":"
-  sink.addString(error.sourceId)
-  sink.add '}'
+proc writeRun(sink: var JsonSink, snapshot: Snapshot, run: DiagnosticRun,
+    first: bool) =
+  for index in 0 ..< run.count:
+    if not first or index > 0:
+      sink.add ','
+    sink.add "{\"code\":"
+    sink.addString($run.error.code)
+    sink.add ",\"detail\":"
+    sink.addString(run.error.detail)
+    sink.add ",\"sourceId\":"
+    if run.list < 0:
+      sink.addString(run.error.sourceId)
+    else:
+      sink.addString(snapshot.lists[run.list].meta.id)
+    sink.add '}'
 
 proc emit(output: QueryOutput, sink: var JsonSink) =
   let snapshot = output.snapshot
@@ -406,9 +437,7 @@ proc emit(output: QueryOutput, sink: var JsonSink) =
       sink.writeList(snapshot[], snapshot.lists[index])
   of DiagnosticOutput:
     for index in output.first .. output.last:
-      if index > output.first:
-        sink.add ','
-      sink.writeError(snapshot.diagnostics[index])
+      sink.writeRun(snapshot[], snapshot.diagnostics[index], index == output.first)
   sink.add "]}"
 
 proc jsonLen*(output: QueryOutput): int =
@@ -416,15 +445,16 @@ proc jsonLen*(output: QueryOutput): int =
   output.emit(sink)
   sink.len
 
-proc writeJson*(output: QueryOutput, data: ptr UncheckedArray[char]) =
-  ## Writes exactly `jsonLen` bytes to `data`.
-  var sink = writing(data)
+proc writeJson*(output: QueryOutput, data: ptr UncheckedArray[char], size: int) =
+  ## Writes the `size` = `jsonLen` bytes of the output to `data`.
+  var sink = writing(data, size)
   output.emit(sink)
+  doAssert sink.len == size
 
 proc json*(output: QueryOutput): string =
   result = newString(output.jsonLen)
   if result.len > 0:
-    output.writeJson(cast[ptr UncheckedArray[char]](addr result[0]))
+    output.writeJson(cast[ptr UncheckedArray[char]](addr result[0]), result.len)
 
 func tokenPage(output: QueryOutput): Page[Token] =
   ## Materializes a token output for Nim callers.
@@ -499,8 +529,15 @@ func getLists*(snapshot: Snapshot): Page[TokenList] =
     result.items.add snapshot.materialize(list)
 
 func getDiagnostics*(snapshot: Snapshot): Page[TklError] =
-  Page[TklError](revision: snapshot.revisionValue,
-    total: snapshot.diagnostics.len, items: snapshot.diagnostics)
+  result = Page[TklError](revision: snapshot.revisionValue,
+    total: snapshot.diagnosticCount,
+    items: newSeqOfCap[TklError](snapshot.diagnosticCount))
+  for run in snapshot.diagnostics:
+    for _ in 0 ..< run.count:
+      var error = run.error
+      if run.list >= 0:
+        error.sourceId = snapshot.lists[run.list].meta.id
+      result.items.add error
 
 type SnapshotDiff* = object
   chains*: seq[uint64]
