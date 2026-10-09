@@ -110,3 +110,23 @@ suite "token store":
       let many = timed(true, shift)
       checkpoint "one chain " & $single & ", distinct << " & $shift & " " & $many
       check many < single * 4 + initDuration(milliseconds = 20)
+
+  test "a full prefix table interns no prefix it cannot use":
+    var store = initTokenStore()
+    for i in 0 ..< 255:
+      discard store.add(1, a, symbol = $i, logoUri = "https://host" & $i & ".org/a/b/logo.png")
+    check store.prefixCount == 255
+    let url = "https://other.org/a/b/c/logo.png"
+    let before = store.textBytes
+    let index = store.add(1, a, symbol = "new", logoUri = url)
+    check store.logo(store.record(index)) == url
+    check store.textBytes - before == url.len + "new".len
+    var copy = initTokenStore()
+    for i in 0 ..< 255:
+      discard copy.add(1, a, symbol = $i, logoUri = "https://copy" & $i & ".org/a/b/logo.png")
+    var source = initTokenStore()
+    let original = source.add(1, a, symbol = "new", logoUri = url)
+    let copyBefore = copy.textBytes
+    let copied = copy.copyRecord(source, original)
+    check copy.logo(copy.record(copied)) == url
+    check copy.textBytes - copyBefore == url.len + "new".len
