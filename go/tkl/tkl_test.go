@@ -3,6 +3,8 @@ package tkl
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -331,5 +333,64 @@ func TestControlCharactersInIdsStayValidJSON(t *testing.T) {
 	}
 	if state, err := h.RefreshState(); err != nil || state.LastSuccess != 13 {
 		t.Fatal(state, err)
+	}
+}
+
+// A stored list loaded after its bundled copy replaces it; the compacted store
+// answers exactly like a load that only saw the stored lists.
+func TestStoredAfterBundledMatchesStoredOnly(t *testing.T) {
+	fixture := func(id string) []byte {
+		body, err := os.ReadFile(filepath.Join("..", "..", "fixtures", "embedded", id+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	config := Config{Chains: []uint64{1, 10, 8453}, MainListID: "main",
+		InitialLists: []ListContent{{ID: "main"}}}
+	bootstrap := Bootstrap{Stored: []ListContent{{ID: "main", Source: "https://example.org/main"},
+		{ID: "extra", Source: "https://example.org/extra"}}}
+	load := func(bodies []ListBody) *Handle {
+		h, err := Create(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Destroy() })
+		txn, err := h.LoadBegin(bootstrap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, body := range bodies {
+			if err = h.LoadList(txn, body.ID, body.Origin, body.Data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err = h.LoadFinish(txn); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	stored := []ListBody{{ID: "main", Origin: Stored, Data: fixture("coingecko_base")},
+		{ID: "extra", Origin: Stored, Data: fixture("coingecko_optimism")}}
+	bundledFirst := load([]ListBody{{ID: "main", Origin: Bundled, Data: fixture("uniswap")},
+		stored[1], stored[0]})
+	storedOnly := load(stored)
+	for _, query := range []struct {
+		op    string
+		input any
+	}{
+		{"get_all", map[string]any{"offset": 0, "limit": 0}},
+		{"get_lists", struct{}{}},
+		{"get_diagnostics", struct{}{}},
+		{"get_by_chains", map[string]any{"chains": []uint64{10}, "offset": 0, "limit": 0}},
+	} {
+		rc, want, err := storedOnly.raw(query.op, query.input)
+		if err != nil || rc != 0 {
+			t.Fatal(query.op, rc, err)
+		}
+		rc, got, err := bundledFirst.raw(query.op, query.input)
+		if err != nil || rc != 0 || string(got) != string(want) {
+			t.Fatalf("%s differs after compaction: rc=%d %d vs %d bytes", query.op, rc, len(got), len(want))
+		}
 	}
 }
