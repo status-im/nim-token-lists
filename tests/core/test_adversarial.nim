@@ -85,6 +85,23 @@ suite "adversarial list shapes":
         elif actual.isOk and expected.isOk:
           check actual.get.rows.len == expected.get.rows.len
 
+  test "distinct chain ids cost no more per row than one chain":
+    const Rows = 40_000
+    proc work(spread: bool, shift = 0): int =
+      var store = initTokenStore()
+      probes = 0
+      for index in 0 ..< Rows:
+        let chain = if spread: uint64(index) shl shift else: 1'u64
+        discard store.addToken(chain, "0x" & toHex(index, 40), 6, "N", "S", "", "")
+      check store.chainIds.len == (if spread: Rows else: 1)
+      probes
+    let single = work(false)
+    # Low and high id bits: neither may cluster the chain table.
+    for shift in [0, 32]:
+      let many = work(true, shift)
+      checkpoint "one chain " & $single & ", distinct << " & $shift & " " & $many
+      check many < single + 4 * Rows
+
   test "chain ids crafted for a known seed spread over the chain table":
     const Count = 20_000
     var store = initTokenStore()
