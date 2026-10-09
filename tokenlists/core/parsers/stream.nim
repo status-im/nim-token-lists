@@ -84,7 +84,8 @@ type
     seen: set[Field]
     list: TokenList
     logoNull, tagsSet: bool
-    rowIndex: int
+    rowIndex, rowCount: int
+      ## `rowCount`: rows the tokens expand to, contracts included.
 
 const
   ManyKeys = 16
@@ -949,13 +950,13 @@ proc rowValue(
     start = s.pos
     ws = s.ws
     adjust = s.adjust
+  s.contracts.setLen(0)
   if kind != ObjectValue:
     row.faults.fault(modes, message(errCurlyLeExpected))
     if not s.skipValue(kind):
       return false
   else:
     let known = if format == StandardFormat: StandardFields else: StatusFields
-    s.contracts.setLen(0)
     s.members(slot):
       let field = s.fieldOf(slot, known)
       var valueKind: Kind
@@ -1005,6 +1006,9 @@ proc tokensValue(
     var row = Row()
     if not s.rowValue(format, modes, row):
       return false
+    document.rowCount += (if format == StandardFormat: 1 else: s.contracts.len)
+    if document.rowCount > s.limits.maxRows:
+      return s.fail("TooLarge")
     for mode in modes:
       if row.faults[mode].found and not document.rowFaults[mode].found:
         document.rowFaults[mode] = row.faults[mode]
@@ -1127,7 +1131,7 @@ proc scanList(
   doAssert format in {StandardFormat, StatusFormat}
   if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
       limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
-      limits.maxStringBytes <= 0:
+      limits.maxStringBytes <= 0 or limits.maxRows <= 0:
     return err(tklError(InvalidArgument, "InvalidLimits", sourceId))
   if body.len > limits.maxBytes:
     return err(tklError(InvalidArgument, "TooLarge", sourceId))

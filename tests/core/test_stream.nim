@@ -125,16 +125,16 @@ suite "streaming parser matches the typed decoder":
   test "tight limits":
     for limits in [
         ParseLimits(maxBytes: 64, maxDepth: 2, maxArrayItems: 1,
-          maxObjectMembers: 3, maxStringBytes: 4),
+          maxObjectMembers: 3, maxStringBytes: 4, maxRows: 1 shl 30),
         ParseLimits(maxBytes: 40, maxDepth: 3, maxArrayItems: 2,
-          maxObjectMembers: 8, maxStringBytes: 64),
+          maxObjectMembers: 8, maxStringBytes: 64, maxRows: 1 shl 30),
         ParseLimits(maxBytes: 0, maxDepth: 1, maxArrayItems: 1,
-          maxObjectMembers: 1, maxStringBytes: 1)]:
+          maxObjectMembers: 1, maxStringBytes: 1, maxRows: 1 shl 30)]:
       for body in Cases:
         agree(body, limits)
     # Escapes that re-encode longer than the document: a row and tags.
     let limits = ParseLimits(maxBytes: 48, maxDepth: 8, maxArrayItems: 8,
-      maxObjectMembers: 8, maxStringBytes: 64)
+      maxObjectMembers: 8, maxStringBytes: 64, maxRows: 1 shl 30)
     agree("{\"tokens\":[{\"name\":\"\\v\\v\\v\\v\\v\\v\\v\\v\"}]}", limits)
     agree("{\"tags\":{\"a\":\"\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\"},\"name\":\"\"}", limits)
     agree("{\"tags\":{\"a\":\"\\0\\0\\0\\0\\0\\0\\0\\0\\0\\0\"},\"timestamp\":5}", limits)
@@ -162,7 +162,7 @@ suite "streaming parser matches the typed decoder":
       seeds.add readFile(path)
     const Alphabet = "{}[],:\"\\ -+.0123456789eEtrufalsnxu/\t\n\x01\xff\xc3\xa9"
     let limits = ParseLimits(maxBytes: 4096, maxDepth: 6, maxArrayItems: 16,
-      maxObjectMembers: 12, maxStringBytes: 48)
+      maxObjectMembers: 12, maxStringBytes: 48, maxRows: 1 shl 30)
     for round in 0 ..< 30_000:
       var body = seeds[rng.rand(seeds.high)]
       for _ in 0 .. rng.rand(3):

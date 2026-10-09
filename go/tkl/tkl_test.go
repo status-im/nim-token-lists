@@ -175,7 +175,7 @@ func TestRefreshPersistenceAndSchedule(t *testing.T) {
 	}
 }
 func TestLimitsAndInputIsolation(t *testing.T) {
-	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64, MaxRows: 100}
 	h, err := CreateWithLimits(Config{}, &limits)
 	if err != nil {
 		t.Fatal(err)

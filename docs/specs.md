@@ -127,6 +127,13 @@ bodies. `tkl_create` accepts an ABI version and a JSON object containing `config
 and optional `limits`; mismatched versions fail before creating a handle. Config
 list entries are metadata only (ID, format, source, fetch metadata).
 
+`limits` holds `maxBytes`, `maxDepth`, `maxArrayItems`, `maxObjectMembers`,
+`maxStringBytes` and `maxRows`, all positive. `maxRows` caps the token rows one
+list expands to (a Status token yields one row per contract); a list beyond it
+fails with `TooLarge`. The default, 100000, is 20 times the largest bundled
+list (4765 rows), and bounds a 16 MiB Status list that would otherwise expand
+to 1.6 million records.
+
 Loading is a transaction. `tkl_load_begin` accepts `stored` (persisted list and
 registry metadata, including failures), `customs` and `state` and returns a load
 ID. `tkl_load_list` passes one body as a borrowed pointer and length with its

@@ -48,7 +48,8 @@ proc statusList(rows, contracts: int, descending: bool): string =
   result.add "]}"
 
 const limits = ParseLimits(maxBytes: 64 shl 20, maxDepth: 32,
-  maxArrayItems: 1 shl 20, maxObjectMembers: 1 shl 20, maxStringBytes: 1 shl 20)
+  maxArrayItems: 1 shl 20, maxObjectMembers: 1 shl 20, maxStringBytes: 1 shl 20,
+  maxRows: 1 shl 20)
 
 proc work(body: string, rows: var int): int =
   var store = initTokenStore()
@@ -136,3 +137,18 @@ suite "adversarial list shapes":
     let parsed = parseList(store, body, StandardFormat, "src", limits, false)
     check parsed.isOk
     check probes < 8 * Count
+
+  test "rows a list expands to are capped":
+    # The largest bundled list has 4765 rows.
+    check DefaultParseLimits.maxRows >= 20 * 4765
+    let body = statusList(2, 100, false)
+    var capped = limits
+    for (maxRows, expected) in [(199, false), (200, true)]:
+      capped.maxRows = maxRows
+      for validate in [false, true]:
+        var store = initTokenStore()
+        let parsed = parseList(store, body, StatusFormat, "src", capped, validate)
+        check parsed.isOk == expected
+        if not expected:
+          check parsed.error.detail == "TooLarge"
+      check validateList(body, StatusFormat, "src", capped).isOk == expected
