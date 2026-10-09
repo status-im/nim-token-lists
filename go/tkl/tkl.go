@@ -10,6 +10,7 @@ package tkl
 */
 import "C"
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"unsafe"
@@ -292,6 +293,48 @@ func (h *Handle) GetByChains(chains []uint64, offset, limit int) (Page[Token], e
 		Offset int      `json:"offset"`
 		Limit  int      `json:"limit"`
 	}{chains, offset, limit})
+}
+
+// ChainToken is a catalogue token narrowed to what balance fetching reads.
+type ChainToken struct {
+	ChainID  uint64
+	Address  [20]byte
+	Decimals uint8
+}
+
+// GetByChainsPacked answers GetByChains(chains, 0, 0) as ChainTokens, in the
+// same order, without JSON. It fills dst[:0] when it has room, otherwise one
+// new slice, and also returns the revision answered.
+func (h *Handle) GetByChainsPacked(chains []uint64, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if h == nil {
+		return dst[:0], 0, InvalidHandle
+	}
+	var out C.TklBuf
+	rc := C.tkl_get_by_chains_packed(h.h, (*C.uint64_t)(unsafe.SliceData(chains)), C.size_t(len(chains)), &out)
+	if rc != 0 {
+		return dst[:0], 0, statusError(rc, takeBuf(&out))
+	}
+	defer C.tkl_buf_free(&out)
+	const header, record = C.TKL_PACKED_HEADER_BYTES, C.TKL_PACKED_RECORD_BYTES
+	data := unsafe.Slice((*byte)(unsafe.Pointer(out.data)), int(out.len))
+	if len(data) < header || binary.LittleEndian.Uint32(data) != C.TKL_PACKED_MAGIC {
+		return dst[:0], 0, Internal
+	}
+	count := int(binary.LittleEndian.Uint32(data[4:]))
+	if len(data) != header+count*record {
+		return dst[:0], 0, Internal
+	}
+	if cap(dst) < count {
+		dst = make([]ChainToken, count)
+	}
+	dst = dst[:count]
+	for i := range dst {
+		r := data[header+i*record : header+(i+1)*record]
+		dst[i].ChainID = binary.LittleEndian.Uint64(r)
+		copy(dst[i].Address[:], r[8:28])
+		dst[i].Decimals = r[28]
+	}
+	return dst, binary.LittleEndian.Uint64(data[8:]), nil
 }
 
 func (h *Handle) GetList(id string) (Page[TokenList], error) {
