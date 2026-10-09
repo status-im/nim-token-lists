@@ -4,7 +4,7 @@ import ./common
 export types, errors
 
 proc decodeStandardSource*(
-    data: string, sourceId = "",
+    data: openArray[char], sourceId = "",
     limits = DefaultParseLimits
 ): Result[ParsedSource, TklError] =
   let wire = ?decodeDocument(data, WireList, limits, sourceId)
@@ -15,7 +15,7 @@ proc decodeStandardSource*(
   ok(source)
 
 proc parseStandard*(
-    data: string, chains: openArray[uint64], sourceId = "",
+    data: openArray[char], chains: openArray[uint64], sourceId = "",
     limits = DefaultParseLimits
 ): Result[ParsedList, TklError] =
   let source = ?decodeStandardSource(data, sourceId, limits)

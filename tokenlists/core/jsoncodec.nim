@@ -77,10 +77,11 @@ proc readValue*(
     else: int64(magnitude)
 
 proc decodeDocument*[T](
-    data: string, kind: typedesc[T],
+    data: openArray[char], kind: typedesc[T],
     limits: ParseLimits = DefaultParseLimits, sourceId = "", requireFields = false
 ): Result[T, TklError] =
-  ## Only memory input is used. Exceptions are adapted at this boundary.
+  ## Reads `data` in place for the duration of the call; nothing retains it.
+  ## Exceptions are adapted at this boundary.
   mixin readValue
   if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
       limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
@@ -100,7 +101,8 @@ proc decodeDocument*[T](
     stringLengthLimit: limits.maxStringBytes,
   )
   try:
-    let stream = memoryInput(data)
+    # memoryInput would copy the whole document into stream pages.
+    let stream = unsafeMemoryInput(data.toOpenArrayByte(0, data.high))
     var flags = {JsonReaderFlag.allowUnknownFields}
     if requireFields:
       flags.incl JsonReaderFlag.requireAllFields
@@ -109,7 +111,8 @@ proc decodeDocument*[T](
     while stream.readable:
       if char(stream.read()) notin {' ', '\t', '\r', '\n'}:
         return err(tklError(InvalidArgument, "TrailingData", sourceId))
-    var typedReader = JsonReader[DefaultFlavor].init(memoryInput(data), flags, conf)
+    var typedReader = JsonReader[DefaultFlavor].init(
+      unsafeMemoryInput(data.toOpenArrayByte(0, data.high)), flags, conf)
     # Keep ownership here so partially populated fields are destroyed if reading
     # raises. The value-returning overload can leak its partial result on error.
     var decoded: T

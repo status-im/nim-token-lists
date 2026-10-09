@@ -106,7 +106,7 @@ func validTimestamp(value: string): bool =
     parseChainId(value[index + 4 .. index + 5]).get <= 59
 
 proc strictDecode[T](
-    data: string, kind: typedesc[T], limits: ParseLimits, sourceId: string
+    data: openArray[char], kind: typedesc[T], limits: ParseLimits, sourceId: string
 ): Result[T, TklError] =
   let decoded = decodeDocument(data, T, limits, sourceId, requireFields = true)
   if decoded.isErr:
@@ -114,12 +114,13 @@ proc strictDecode[T](
   decoded
 
 proc validateDocument*(
-    data: string, format: ListFormat, sourceId = "",
+    data: openArray[char], format: ListFormat, sourceId = "",
     limits = DefaultParseLimits
 ): Result[void, TklError] =
   ## Required fields and types, not a remote/general JSON Schema interpreter.
   ## Parsers filter individual rows; one unusable token must not reject a list.
-  discard ?decodeDocument(data, JsonString, limits, sourceId)
+  # Well-formedness only: materializing the document would copy it.
+  discard ?decodeDocument(data, JsonVoid, limits, sourceId)
   template invalid(detail: string): untyped =
     return err(tklError(InvalidContent, detail, sourceId))
 
