@@ -1,5 +1,7 @@
 NIM ?= nim
 NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcache:build/nimcache-tests
+# Go caches cgo links without hashing build/libtkl.a; a stamp of it relinks.
+GO_LIB_STAMP = -ldflags=-X=main.tklLibStamp=$(firstword $(shell cksum build/libtkl.a))
 
 .PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan test-tsan bench bench-parse bench-catalogue fuzz-core isolate audit clean
 lib:
@@ -32,15 +34,15 @@ test-c: lib
 	cc -std=c11 -Wall -Wextra -o build/transactions tests/abi/transactions.c -Iabi build/libtkl.a -lpthread -lm
 	build/transactions
 test-go: lib
-	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 ./...
+	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 $(GO_LIB_STAMP) ./...
 test-differential: lib
-	cd tests/differential && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -count=1 ./...
+	cd tests/differential && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -count=1 $(GO_LIB_STAMP) ./...
 test-asan:
 	NIM="$(NIM)" bash scripts/test_asan.sh
 test-tsan:
 	NIM="$(NIM)" bash scripts/test_tsan.sh
 bench: lib
-	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -run '^$$' -bench . -benchmem ./...
+	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -run '^$$' -bench . -benchmem $(GO_LIB_STAMP) ./...
 isolate: lib
 	scripts/isolate_lib.sh
 audit: isolate

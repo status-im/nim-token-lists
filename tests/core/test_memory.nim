@@ -237,3 +237,18 @@ suite "single-pass parsing":
       discard loadAll(config, bodies)
     checkpoint "bodies " & $total & " churn " & $usage.churn
     check usage.churn < 4 * total
+
+suite "direct query encoding":
+  test "query JSON is one exactly sized allocation":
+    let (config, bodies) = embedded()
+    let catalogue = loadAll(config, bodies)
+    let snapshot = catalogue.published
+    var text: string
+    let all = measure:
+      text = snapshot[].allOutput().get.json
+    checkpoint "output " & $text.len & " churn " & $all.churn
+    check text.len > 2 * Mib
+    check all.churn < text.len + 64 * 1024
+    let lists = measure:
+      text = snapshot[].listsOutput.json
+    check lists.churn < text.len + 64 * 1024

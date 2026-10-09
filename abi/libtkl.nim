@@ -90,6 +90,15 @@ proc fillBuf(outBuf: ptr TklBuf, value: string): int32 =
     cap: csize_t(max(value.len, 1)))
   int32(Ok)
 
+proc fillOutput(outBuf: ptr TklBuf, output: QueryOutput): bool =
+  ## Writes a query answer straight into one exactly sized C allocation.
+  let size = output.jsonLen
+  let mem = cMalloc(csize_t(max(size, 1)))
+  if mem.isNil: return false
+  output.writeJson(cast[ptr UncheckedArray[char]](mem))
+  outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(max(size, 1)))
+  true
+
 proc errorBuf(outBuf: ptr TklBuf, error: TklError): int32 =
   if not outBuf.isNil: discard fillBuf(outBuf, Json.encode(error))
   int32(error.code)
@@ -208,13 +217,8 @@ proc publish(h: ptr HandleObj) =
   if h.core[].revision != h.published.revision:
     h.published.publish(h.core[].published)
 
-func normalizedList(list: sink TokenList): TokenList =
-  var value = list
-  if string(value.tags).len == 0: value.tags = JsonString("{}")
-  value
-
 type
-  QueryHandler = proc(snapshot: Snapshot, request: Request): Result[string, TklError]
+  QueryHandler = proc(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError]
     {.nimcall, raises: [], gcsafe.}
   WriterHandler = proc(h: ptr HandleObj, request: Request): Result[string, TklError]
     {.nimcall, raises: [], gcsafe.}
@@ -224,15 +228,19 @@ proc encodeResult[T](value: Result[T, TklError]): Result[string, TklError] =
   ok(Json.encode(output))
 
 proc operate(
-    h: ptr HandleObj, input: openArray[char], reader: QueryHandler,
-    writer: WriterHandler
+    h: ptr HandleObj, input: openArray[char], outBuf: ptr TklBuf,
+    reader: QueryHandler, writer: WriterHandler
 ): Result[string, TklError] =
   let request = ?decodeDocument(input, Request, envelopeLimits(h.limits))
   if not reader.isNil:
     h.published.read(snapshot):
       if snapshot.isNil:
         return err(tklError(InvalidArgument, "NotLoaded"))
-      return reader(snapshot[], request)
+      # Encoded under the read lock: the output borrows the snapshot.
+      let output = ?reader(snapshot[], request)
+      if not fillOutput(outBuf, output):
+        return err(tklError(Internal, "OutOfMemory"))
+      return ok("")
   doAssert not writer.isNil
   acquire(h.writer)
   defer: release(h.writer)
@@ -268,7 +276,7 @@ proc run(
     if not validInput(data, length, h.limits.maxBytes):
       Result[string, TklError].err(tklError(InvalidArgument, "InvalidInputBuffer"))
     else:
-      operate(h, bytes(data, length), reader, writer)
+      operate(h, bytes(data, length), outBuf, reader, writer)
 
 proc idOf(p: cstring, length: csize_t, limits: ParseLimits): Result[string, TklError] =
   if length == 0 or not validBytes(p, length, limits.maxStringBytes):
@@ -337,41 +345,35 @@ proc putBody(h: ptr HandleObj, planId: uint64, id: string,
   ?h.core[].refreshPutBody(planId, id, body)
   ok("")
 
-proc queryByKey(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getByKey(request.key)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc queryByKey(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byKeyOutput(request.key)
 
-proc queryByChainAddress(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getByChainAddress(request.chainId, request.address)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc queryByChainAddress(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainAddressOutput(request.chainId, request.address)
 
-proc queryNative(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getNative(request.chainId)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc queryNative(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.nativeOutput(request.chainId)
 
-proc queryByKeys(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getByKeys(request.keys))
+proc queryByKeys(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byKeysOutput(request.keys)
 
-proc queryByChainAddresses(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getByChainAddresses(request.chainIds, request.addresses))
+proc queryByChainAddresses(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainAddressesOutput(request.chainIds, request.addresses)
 
-proc queryByChains(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getByChains(request.chains, request.offset, request.limit))
+proc queryByChains(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainsOutput(request.chains, request.offset, request.limit)
 
-proc queryAll(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getAll(request.offset, request.limit))
+proc queryAll(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.allOutput(request.offset, request.limit)
 
-proc queryList(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = normalizedList(?snapshot.getList(request.id))
-  ok(Json.encode(coreTypes.Page[TokenList](revision: snapshot.revision, total: 1, items: @[item])))
+proc queryList(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.listOutput(request.id)
 
-proc queryLists(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  var page = snapshot.getLists()
-  for item in page.items.mitems: item = normalizedList(move(item))
-  ok(Json.encode(page))
+proc queryLists(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.listsOutput)
 
-proc queryDiagnostics(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  ok(Json.encode(snapshot.getDiagnostics()))
+proc queryDiagnostics(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.diagnosticsOutput)
 
 proc updateChains(h: ptr HandleObj, request: Request): Result[string, TklError] =
   let change = ?h.core[].setChains(request.chains)
