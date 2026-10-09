@@ -1,4 +1,4 @@
-import std/[unittest, strutils, typetraits]
+import std/[monotimes, strutils, times, typetraits, unittest]
 import ../../tokenlists/core/store
 
 const
@@ -89,3 +89,24 @@ suite "token store":
     check store.frozen
     check store.token(indexes[500]) == before
     check store.retainedBytes < 1000 * (44 + 16)
+
+  test "distinct chain ids cost no more per row than one chain":
+    const Rows = 40_000
+    var addresses: seq[string]
+    for index in 0 ..< Rows:
+      addresses.add "0x" & toHex(index, 40)
+    proc timed(spread: bool, shift = 0): Duration =
+      var store = initTokenStore()
+      let started = getMonoTime()
+      for index in 0 ..< Rows:
+        let chain = if spread: uint64(index) shl shift else: 1'u64
+        discard store.add(chain, addresses[index])
+      result = getMonoTime() - started
+      check store.chainIds.len == (if spread: Rows else: 1)
+    discard timed(false)
+    let single = timed(false)
+    # Low and high id bits: neither may cluster the chain table.
+    for shift in [0, 32]:
+      let many = timed(true, shift)
+      checkpoint "one chain " & $single & ", distinct << " & $shift & " " & $many
+      check many < single * 4 + initDuration(milliseconds = 20)
