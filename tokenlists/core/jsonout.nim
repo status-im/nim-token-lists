@@ -5,6 +5,7 @@
 
 type JsonSink* = object
   data: ptr UncheckedArray[char]
+  capacity: int
   len*: int
     ## Bytes written, or that would be written when measuring.
 
@@ -12,16 +13,19 @@ const HexDigits = "0123456789abcdef"
 
 func measuring*(): JsonSink = JsonSink()
 
-func writing*(data: ptr UncheckedArray[char]): JsonSink =
-  JsonSink(data: data)
+func writing*(data: ptr UncheckedArray[char], capacity: int): JsonSink =
+  ## Writes at most `capacity` bytes; overrunning is a defect.
+  JsonSink(data: data, capacity: capacity)
 
 proc add*(sink: var JsonSink, ch: char) {.inline.} =
   if not sink.data.isNil:
+    doAssert sink.len < sink.capacity
     sink.data[sink.len] = ch
   inc sink.len
 
 proc add*(sink: var JsonSink, text: openArray[char]) {.inline.} =
   if not sink.data.isNil and text.len > 0:
+    doAssert sink.len + text.len <= sink.capacity
     copyMem(addr sink.data[sink.len], unsafeAddr text[0], text.len)
   sink.len += text.len
 

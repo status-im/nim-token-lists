@@ -320,12 +320,13 @@ proc buildFromParsed*(
     token.address = NativeAddress
     token.custom = false
     builder.addExtra(token)
-  var diagnostics = extraDiagnostics
+  for error in extraDiagnostics:
+    builder.addDiagnostic(error)
   var visibleCustoms: seq[Token]
   for token in customs:
     let valid = validateCustom(token, chains)
     if valid.isErr:
-      diagnostics.add tklError(valid.error.code, valid.error.detail, "custom")
+      builder.addDiagnostic tklError(valid.error.code, valid.error.detail, "custom")
       continue
     var normalized = token
     normalized.address = normalizeAddress(token.address).get
@@ -338,13 +339,14 @@ proc buildFromParsed*(
   if policy.priority == CustomFirstPriority:
     addCustoms()
   for entry in parsed.sources:
-    diagnostics.add entry.failures
+    for failure in entry.failures:
+      builder.addDiagnostic(failure)
     if entry.usable:
       builder.addList(entry.list)
-      builder.addRows(entry.rows, diagnostics)
+      builder.addRows(entry.rows)
   if policy.priority == StatusPriority:
     addCustoms()
-  builder.finish(policy, diagnostics)
+  builder.finish(policy)
 
 proc buildFromRefresh*(
     refresh: SourceRefresh, previous: ParsedCatalogue, chains: seq[uint64],
