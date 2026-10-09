@@ -13,6 +13,7 @@ tkl_get_by_chain_address
 tkl_get_by_keys
 tkl_get_by_chain_addresses
 tkl_get_by_chains
+tkl_get_by_chains_packed
 tkl_get_all
 tkl_get_native
 tkl_get_list

@@ -514,6 +514,31 @@ proc tkl_get_by_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
   run(handle, data, length, outBuf, reader = queryByChains)
 
+proc packedByChains(h: ptr HandleObj, chains: openArray[uint64],
+    outBuf: ptr TklBuf): Result[string, TklError] =
+  h.published.read(snapshot):
+    if snapshot.isNil:
+      return err(tklError(InvalidArgument, "NotLoaded"))
+    # Written under the read lock straight from the borrowed snapshot.
+    let size = snapshot[].packedLen(chains)
+    let mem = cMalloc(csize_t(size))
+    if mem.isNil:
+      return err(tklError(Internal, "OutOfMemory"))
+    snapshot[].writePacked(chains, cast[ptr UncheckedArray[byte]](mem), size)
+    outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(size))
+  ok("")
+
+proc tkl_get_by_chains_packed(handle: uint64, chainIds: ptr uint64,
+    count: csize_t, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  guarded(handle, outBuf):
+    if count > csize_t(h.limits.maxArrayItems) or (count > 0 and chainIds.isNil):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidChains"))
+    elif count == 0:
+      packedByChains(h, [], outBuf)
+    else:
+      packedByChains(h, toOpenArray(cast[ptr UncheckedArray[uint64]](chainIds),
+        0, int(count) - 1), outBuf)
+
 proc tkl_get_all(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
   run(handle, data, length, outBuf, reader = queryAll)
