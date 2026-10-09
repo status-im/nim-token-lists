@@ -44,7 +44,10 @@ make test-asan
 
 Go tests cover concurrent access, handle destruction and reuse of borrowed body
 buffers. `make test-tsan` runs the C ABI tests under ThreadSanitizer. Core
-memory tests use a counting allocator to check that no body is copied or kept. The separate differential
+memory tests use a counting allocator to check that no body is copied or kept,
+that a loaded catalogue stays compact and that chain changes rebuild only indices.
+`TestQueryOutputParity` pins the exact output bytes of every query across
+mutations against golden hashes. The separate differential
 test module compares results against pinned SDK parsers; the production Go module
 has no SDK dependency. AddressSanitizer tests require Clang.
 
@@ -63,8 +66,8 @@ Run `make bench` for Go binding lookup, bulk-read and custom-write benchmarks.
 Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
 Run `make bench-catalogue` to measure loads, custom updates, owned snapshot
-copies, direct lookups and refreshes using all eight embedded lists, read at run
-time, in a release build.
+copies, chain changes, direct and batch lookups, bulk reads and refreshes using
+all eight embedded lists, read at run time, in a release build.
 Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser and
 refresh-state fuzz campaigns under AddressSanitizer. For longer campaigns, run
 `bash scripts/fuzz_core.sh parsers -runs=100000` (or use `planner`).

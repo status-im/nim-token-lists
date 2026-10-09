@@ -68,6 +68,36 @@ when compiles(catalogue.getByKey(key)):
     checksum += uint64(catalogue.getByKey(key).get.symbol.len)
   let nanos = float64((getMonoTime() - started).inNanoseconds) / 100_000
   echo &"direct catalogue lookup: {nanos:.1f} ns/op (100000 iterations)"
+var chainChanges, allReads, keyReads, pairReads: seq[float64]
+for index in 0 ..< 20:
+  let chains = if index mod 2 == 0: @[1'u64, 10] else: @[1'u64, 10, 8453, 42161]
+  let started = getMonoTime()
+  checksum += catalogue.setChains(chains).get.revision
+  chainChanges.add millis(started)
+report("set chains", chainChanges)
+for index in 0 ..< 20:
+  let started = getMonoTime()
+  checksum += uint64(catalogue.getAll().get.items.len)
+  allReads.add millis(started)
+report("get all", allReads)
+let sampled = catalogue.getAll().get.items
+var keys: seq[string]
+var pairs: seq[TokenIdentity]
+for index in countup(0, sampled.high, 8):
+  keys.add $sampled[index].chainId & "-" & sampled[index].address
+  pairs.add TokenIdentity(chainId: sampled[index].chainId,
+    address: sampled[index].address)
+for index in 0 ..< 20:
+  let started = getMonoTime()
+  checksum += uint64(catalogue.getByKeys(keys).get.items.len)
+  keyReads.add millis(started)
+report(&"get by keys ({keys.len} keys)", keyReads)
+when compiles(catalogue.getByChainAddresses(pairs)):
+  for index in 0 ..< 20:
+    let started = getMonoTime()
+    checksum += uint64(catalogue.getByChainAddresses(pairs).get.items.len)
+    pairReads.add millis(started)
+  report(&"get by chain addresses ({pairs.len} pairs)", pairReads)
 var registry = """{"timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokenLists":["""
 for index, id in ids:
   registry.add (if index > 0: "," else: "") & """{"id":"""" & id &

@@ -15,15 +15,22 @@ when defined(tklCountParses):
   var parsedContents* {.threadvar.}: int
 
 proc parseListBody*(
-    body: openArray[char], format: ListFormat, sourceId: string,
-    limits: ParseLimits
+    store: var TokenStore, body: openArray[char], format: ListFormat,
+    sourceId: string, limits: ParseLimits
 ): Result[ParsedSource, TklError] =
+  ## Parses into `store`; a failed parse may leave unreferenced rows there.
   when defined(tklCountParses):
     inc parsedContents
   if body.len == 0:
     return err(tklError(InvalidContent, "EmptyListContent", sourceId))
   case format
-  of StandardFormat: decodeStandardSource(body, sourceId, limits)
-  of StatusFormat: decodeStatusSource(body, sourceId, limits)
+  of StandardFormat: decodeStandardSource(store, body, sourceId, limits)
+  of StatusFormat: decodeStatusSource(store, body, sourceId, limits)
   of RegistryFormat:
     err(tklError(UnsupportedSchema, "RegistryIsNotTokenList", sourceId))
+
+proc parseListBody*(
+    body: openArray[char], format: ListFormat, sourceId: string,
+    limits: ParseLimits
+): Result[ParsedSource, TklError] =
+  ownStore(parseListBody(target, body, format, sourceId, limits))
