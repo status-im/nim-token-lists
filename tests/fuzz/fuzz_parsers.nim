@@ -1,6 +1,7 @@
 {.push raises: [], gcsafe.}
 
-import tokenlists/core/[keys, validators]
+import std/strutils
+import tokenlists/core/[keys, validators, jsoncodec, snapshot]
 import tokenlists/core/parsers/[standard, status, registry]
 import tokenlists/api
 
@@ -51,4 +52,15 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
     doAssert listed >= all.len
     if status.isOk:
       doAssert catalogue.get.getList("list").get.tokens == status.get.list.tokens
+    # Direct encoding against json_serialization, which raises on 0x0f/0x1f.
+    let held = catalogue.get.published
+    var lists = held[].getLists()
+    for list in lists.items.mitems:
+      if string(list.tags).len == 0:
+        list.tags = JsonString("{}")
+    let actual = held[].listsOutput.json
+    if "\\u000f" notin actual and "\\u001f" notin actual:
+      doAssert actual == Json.encode(lists)
+      doAssert held[].allOutput().get.json == Json.encode(held[].getAll().get)
+      doAssert held[].diagnosticsOutput.json == Json.encode(held[].getDiagnostics())
   0
