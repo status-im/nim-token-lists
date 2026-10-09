@@ -1,7 +1,7 @@
 {.push raises: [], gcsafe.}
 
-import std/[algorithm, tables, sets]
-import ./[types, store]
+import std/[algorithm, sequtils, tables, sets]
+import ./[types, store, hashing]
 export types, store
 
 type
@@ -36,6 +36,7 @@ type
     diagnosticCount: int
     aliases: seq[(Identity, Identity)]
     skipped: seq[Identity]
+      ## Both sorted by (alias) identity and unique, for binary search.
 
 proc `=copy`*(dest: var Snapshot, source: Snapshot) {.error:
   "a Snapshot copy would share its store ref; use `detached`".}
@@ -136,19 +137,32 @@ func search(snapshot: Snapshot, identity: Identity): int =
     else: high = middle - 1
   -1
 
+func countedCmp(a, b: Identity): int =
+  countProbe()
+  cmp(a, b)
+
+func skips(snapshot: Snapshot, identity: Identity): bool =
+  snapshot.skipped.binarySearch(identity, countedCmp) >= 0
+
+func aliasIndex(snapshot: Snapshot, identity: Identity): int =
+  snapshot.aliases.binarySearch((identity, identity),
+    proc(a, b: (Identity, Identity)): int = countedCmp(a[0], b[0]))
+
+func unaliased(snapshot: Snapshot, identity: Identity): int =
+  ## The position of `identity`, or of the native token it aliases.
+  let alias = snapshot.aliasIndex(identity)
+  snapshot.search(if alias >= 0: snapshot.aliases[alias][1] else: identity)
+
 func lookup(snapshot: Snapshot, identity: Identity): int =
   ## Applies skips, then native aliases, like the key lookups.
-  if identity in snapshot.skipped:
+  if snapshot.skips(identity):
     return -1
-  for (alias, native) in snapshot.aliases:
-    if alias == identity:
-      return snapshot.search(native)
-  snapshot.search(identity)
+  snapshot.unaliased(identity)
 
 func find(snapshot: Snapshot, identity: Identity): Result[TokenRef, TklError] =
-  if identity in snapshot.skipped:
+  if snapshot.skips(identity):
     return err(tklError(NotFound, "SkippedToken"))
-  let position = snapshot.lookup(identity)
+  let position = snapshot.unaliased(identity)
   if position < 0:
     return err(tklError(NotFound, "TokenNotFound"))
   ok(snapshot.tokens[position])
@@ -161,7 +175,7 @@ proc indexTokens(snapshot: var Snapshot) =
   for list in snapshot.lists:
     for reference in list.tokens:
       let identity = snapshot.identityOf(reference)
-      if identity notin snapshot.skipped:
+      if not snapshot.skips(identity):
         references.add reference
         identities.add identity
   var order = newSeq[uint32](references.len)
@@ -259,10 +273,15 @@ proc finish*(
   snapshot.extra.freeze()
   for key in policy.skippedKeys:
     snapshot.skipped.add ?parseIdentity(key)
+  snapshot.skipped.sort(countedCmp)
+  snapshot.skipped = snapshot.skipped.deduplicate(isSorted = true)
   for alias in policy.nativeAliases:
     let identity = ?identityOf(alias.chainId, alias.address)
-    if snapshot.aliases.find((identity, Identity(chainId: alias.chainId))) < 0:
-      snapshot.aliases.add (identity, Identity(chainId: alias.chainId))
+    snapshot.aliases.add (identity, Identity(chainId: alias.chainId))
+  # An alias names its native token by its own chain id, so equal aliases
+  # are equal pairs.
+  snapshot.aliases.sort(proc(a, b: (Identity, Identity)): int = countedCmp(a[0], b[0]))
+  snapshot.aliases = snapshot.aliases.deduplicate(isSorted = true)
   snapshot.indexTokens()
   ok(snapshot)
 
@@ -604,7 +623,8 @@ func diffSnapshots*(before, after: Snapshot): SnapshotDiff =
     if lookupDiffers(before, after, alias):
       chains.incl alias.chainId
   for (alias, native) in after.aliases:
-    if before.aliases.find((alias, native)) < 0 and
+    let previous = before.aliasIndex(alias)
+    if (previous < 0 or before.aliases[previous][1] != native) and
         lookupDiffers(before, after, alias):
       chains.incl alias.chainId
   var oldLists, newLists: Table[string, int]
