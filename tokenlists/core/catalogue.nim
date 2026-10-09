@@ -1,5 +1,6 @@
 {.push raises: [], gcsafe.}
 
+import std/sets
 import ./[builder, keys, planner]
 export builder, planner
 
@@ -46,7 +47,7 @@ type
     limits: ParseLimits
     refreshId: uint64
     refreshSnapshot: Snapshot
-    refreshParsed: ParsedCatalogue
+    refreshSources: SourceRefresh
     refreshChange: Change
     refreshDiagnostics: seq[TklError]
     diagnostics: seq[TklError]
@@ -248,7 +249,7 @@ func refreshState*(catalogue: Catalogue): RefreshState = catalogue.planner.state
 proc clearRefresh(catalogue: var Catalogue) =
   catalogue.refreshId = 0
   catalogue.refreshSnapshot = Snapshot()
-  catalogue.refreshParsed = ParsedCatalogue()
+  catalogue.refreshSources = SourceRefresh()
   catalogue.refreshChange = Change()
   catalogue.refreshDiagnostics = @[]
 
@@ -279,21 +280,32 @@ proc refreshApply*(
   let report = ?catalogue.planner.applyResults(planId, responses, now,
     catalogue.revision, catalogue.epoch)
   if report.step == RefreshStep.Ready:
-    let parsed = parseCatalogueSources(catalogue.config,
-      catalogue.planner.preparedContents, catalogue.limits)
-    if parsed.isErr:
+    # Writes are the only candidate contents that differ from the committed ones
+    # `catalogue.parsed` was built from.
+    var written: HashSet[string]
+    for content in report.writes:
+      written.incl content.id
+    var sources = reparseCatalogueSources(catalogue.parsed, catalogue.config,
+      catalogue.planner.preparedContents, written, catalogue.limits)
+    if sources.isErr:
       discard catalogue.planner.abortPlan(planId, Aborted)
-      return err(parsed.error)
-    let next = buildFromParsed(parsed.get, catalogue.config.chains,
-      catalogue.config.policy, catalogue.customs, ?catalogue.nextRevision(),
-      report.diagnostics)
-    if next.isErr:
-      discard catalogue.planner.abortPlan(planId, Aborted)
-      return err(next.error)
+      return err(sources.error)
+    let revision = ?catalogue.nextRevision()
+    if sources.get.unchanged and report.diagnostics == catalogue.diagnostics:
+      # Same parsed lists, chains, policy, customs and diagnostics would
+      # rebuild the current snapshot, so commit publishes nothing.
+      catalogue.refreshChange = Change(revision: revision, kind: RefreshChange)
+    else:
+      let next = sources.get.buildFromRefresh(catalogue.parsed,
+        catalogue.config.chains, catalogue.config.policy, catalogue.customs,
+        revision, report.diagnostics)
+      if next.isErr:
+        discard catalogue.planner.abortPlan(planId, Aborted)
+        return err(next.error)
+      catalogue.refreshChange = describeChange(catalogue.current, next.get, RefreshChange)
+      catalogue.refreshSnapshot = next.get
     catalogue.refreshId = planId
-    catalogue.refreshParsed = parsed.get
-    catalogue.refreshSnapshot = next.get
-    catalogue.refreshChange = describeChange(catalogue.current, next.get, RefreshChange)
+    catalogue.refreshSources = move(sources.get)
     catalogue.refreshDiagnostics = report.diagnostics
   ok(report)
 
@@ -307,7 +319,7 @@ proc refreshCommit*(
     catalogue.refreshChange.lists.len > 0 or
     catalogue.refreshDiagnostics != catalogue.diagnostics
   ?catalogue.planner.commitPlan(planId, now, catalogue.revision, catalogue.epoch)
-  catalogue.parsed = move(catalogue.refreshParsed)
+  catalogue.parsed.adoptSources(move(catalogue.refreshSources))
   catalogue.diagnostics = move(catalogue.refreshDiagnostics)
   let change = if changed:
       catalogue.publish(move(catalogue.refreshSnapshot), catalogue.refreshChange)

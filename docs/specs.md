@@ -166,6 +166,8 @@ Final reports contain persistence writes, per-source outcomes and an overall
 full, partial, unchanged or failed outcome. Failed sources keep their prior
 content. Sources removed from the registry remain merged and receive orphaned
 diagnostics. Apply builds an unpublished candidate and precomputes its change.
+It parses only lists written by the run; a run that leaves every list and
+diagnostic unchanged skips the rebuild.
 Commit publishes only after the host's durable write succeeds. Abort leaves
 published content, ETags and last-success time unchanged. A wholly failed run
 releases its plan; a partial run can commit the successful writes. An unchanged
