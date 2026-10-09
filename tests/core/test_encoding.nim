@@ -39,7 +39,7 @@ suite "direct query encoding":
   test "every query kind matches the materialized encoding":
     let catalogue = loaded()
     let snapshot = catalogue.published
-    let held = snapshot[]
+    let held = snapshot[].detached
     check held.allOutput().get.json == Json.encode(held.getAll().get)
     for (offset, limit) in [(0, 1), (5, 100), (8000, 0), (100_000, 3)]:
       check held.allOutput(offset, limit).get.json ==
