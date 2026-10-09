@@ -161,11 +161,16 @@ proc loadBody*(
   ok()
 
 proc absorb(
-    store: var TokenStore, source: TokenStore, rows: openArray[uint32]
-): seq[uint32] =
-  result = newSeqOfCap[uint32](rows.len)
+    store: var TokenStore, source: TokenStore, rows: openArray[uint32],
+    sourceId: string
+): Result[seq[uint32], TklError] =
+  var copied = newSeqOfCap[uint32](rows.len)
   for row in rows:
-    result.add store.copyRecord(source, row)
+    let index = store.copyRecord(source, row)
+    if index.isNone:
+      return err(tklError(InvalidArgument, "TooLarge", sourceId))
+    copied.add index.get
+  ok(copied)
 
 proc shared(store: sink TokenStore): StoreRef =
   var value = store
@@ -219,7 +224,7 @@ proc finishSources*(
     if not chosen.isNil:
       entry.list = move(chosen.list)
       entry.rows = if sources.unreferenced:
-          compacted.absorb(sources.store, chosen.rows)
+          ?compacted.absorb(sources.store, chosen.rows, id)
         else: move(chosen.rows)
       entry.usable = true
       list[] = LoadedList()
@@ -262,14 +267,14 @@ proc refreshSources*(
       let update = addr updates[updateIndex.getOrDefault(id)]
       entry.origin = origin(update.meta, update.meta.format, update.bodyLen)
       entry.list = move(update.source.list)
-      entry.rows = store.absorb(update.source.store, update.source.rows)
+      entry.rows = ?store.absorb(update.source.store, update.source.rows, id)
       entry.usable = true
       update.source = ParsedSource()
     else:
       let reused = addr previous.sources[previousIndex.getOrDefault(id)]
       entry = CachedSource(list: reused.list, failures: reused.failures,
         usable: reused.usable, origin: reused.origin)
-      entry.rows = store.absorb(previous.store[], reused.rows)
+      entry.rows = ?store.absorb(previous.store[], reused.rows, id)
     output.parsed.sources.add entry
   output.parsed.store = shared(store)
   ok(output)
@@ -319,7 +324,7 @@ proc buildFromParsed*(
       crossChainId: "eth-native", decimals: 18, logoUri: DefaultNativeLogo))
     token.address = NativeAddress
     token.custom = false
-    builder.addExtra(token)
+    ?builder.addExtra(token)
   for error in extraDiagnostics:
     builder.addDiagnostic(error)
   var visibleCustoms: seq[Token]
@@ -335,7 +340,7 @@ proc buildFromParsed*(
   template addCustoms() =
     builder.addList(TokenList(id: "custom", name: "Custom tokens"))
     for token in visibleCustoms:
-      builder.addExtra(token)
+      ?builder.addExtra(token)
   if policy.priority == CustomFirstPriority:
     addCustoms()
   for entry in parsed.sources:

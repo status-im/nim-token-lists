@@ -7,7 +7,7 @@ const
 
 proc add(store: var TokenStore, chain: uint64, address: string, symbol = "A",
     name = "", logoUri = "", crossChainId = "", decimals = 18'u64): uint32 =
-  store.addToken(chain, address, decimals, name, symbol, logoUri, crossChainId)
+  store.addToken(chain, address, decimals, name, symbol, logoUri, crossChainId).get
 
 suite "token store":
   test "records are plain fixed-size values":
@@ -75,9 +75,9 @@ suite "token store":
     let index = source.add(5, a, symbol = "SYM", name = "Name", logoUri = logo)
     var target = initTokenStore()
     discard target.add(1, a, symbol = "OTHER")
-    let copied = target.copyRecord(source, index)
+    let copied = target.copyRecord(source, index).get
     check target.token(copied) == source.token(index)
-    check target.copyRecord(source, index) == copied
+    check target.copyRecord(source, index).get == copied
 
   test "freezing drops build tables and keeps content":
     var store = initTokenStore()
@@ -127,6 +127,6 @@ suite "token store":
     var source = initTokenStore()
     let original = source.add(1, a, symbol = "new", logoUri = url)
     let copyBefore = copy.textBytes
-    let copied = copy.copyRecord(source, original)
+    let copied = copy.copyRecord(source, original).get
     check copy.logo(copy.record(copied)) == url
     check copy.textBytes - copyBefore == url.len + "new".len

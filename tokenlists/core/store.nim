@@ -51,7 +51,7 @@ const
   MaxPrefixes = 255
   MaxRecords* {.intdefine: "tklMaxRecords".} = 0x7FFF_FFFF
     ## Record indices stay below a snapshot's extra-store bit.
-  MaxTextBytes {.intdefine: "tklMaxTextBytes".} = int(high(uint32))
+  MaxTextBytes* {.intdefine: "tklMaxTextBytes".} = int(high(uint32))
     ## Arena offsets are 32-bit.
   PrefixSlashes = 5
   HexDigits = "0123456789abcdef"
@@ -337,13 +337,18 @@ proc addRecord(store: var TokenStore, record: TokenRecord): uint32 =
   store.recordSlots[slot] = uint32(store.records.len)
   uint32(store.records.high)
 
+func fits(store: TokenStore, textBytes: int): bool =
+  store.records.len < MaxRecords and store.bytes.len + textBytes <= MaxTextBytes
+
 proc addToken*(
     store: var TokenStore, chainId: uint64, address: openArray[char],
     decimals: uint64, name, symbol, logoUri, crossChainId: openArray[char],
     custom = false
-): uint32 =
+): Opt[uint32] =
   ## Adds one row; an invalid address or decimals is kept as a flag so that
-  ## filtering can still report it in row order.
+  ## filtering can still report it in row order. None when the store is full.
+  if not store.fits(name.len + symbol.len + logoUri.len + crossChainId.len):
+    return Opt.none(uint32)
   var record = TokenRecord(chain: store.chainIndex(chainId))
   if not parseAddress(address, record.address):
     record.flags.incl BadAddress
@@ -357,7 +362,7 @@ proc addToken*(
   record.name = store.intern(name)
   (record.logoPrefix, record.logo) = store.internLogo(logoUri)
   record.crossChainId = store.intern(crossChainId)
-  store.addRecord(record)
+  Opt.some(store.addRecord(record))
 
 proc copyText(store: var TokenStore, source: TokenStore, id: TextId): TextId =
   let (first, last) = source.span(id)
@@ -375,16 +380,22 @@ proc copyLogo(
     return (0'u8, store.intern(source.logo(record)))
   (uint8(entry + 1), store.copyText(source, record.logo))
 
-proc copyRecord*(store: var TokenStore, source: TokenStore, index: uint32): uint32 =
-  ## Re-interns one record of another store into this one.
+proc copyRecord*(
+    store: var TokenStore, source: TokenStore, index: uint32
+): Opt[uint32] =
+  ## Re-interns one record of another store into this one; none when full.
   let original = source.records[index]
+  if not store.fits(source.textLen(original.symbol) +
+      source.textLen(original.name) + source.textLen(original.crossChainId) +
+      source.logoLen(original)):
+    return Opt.none(uint32)
   var record = original
   record.chain = store.chainIndex(source.chainIds[original.chain])
   record.symbol = store.copyText(source, original.symbol)
   record.name = store.copyText(source, original.name)
   record.crossChainId = store.copyText(source, original.crossChainId)
   (record.logoPrefix, record.logo) = store.copyLogo(source, original)
-  store.addRecord(record)
+  Opt.some(store.addRecord(record))
 
 proc trim[T](values: var seq[T]) =
   if values.capacity > values.len:

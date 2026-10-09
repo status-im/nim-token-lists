@@ -1015,13 +1015,19 @@ proc tokensValue(
     if not store.isNil and not document.faults[Lenient].found and
         not document.rowFaults[Lenient].found:
       if format == StandardFormat:
-        source.rows.add store[].addToken(row.chainId, s.view(row.address),
+        let added = store[].addToken(row.chainId, s.view(row.address),
           row.decimals, s.view(row.name), s.view(row.symbol), s.view(row.logo), "")
+        if added.isNone:
+          return s.fail("TooLarge")
+        source.rows.add added.get
       else:
         for contract in s.contracts:
-          source.rows.add store[].addToken(contract.chainId,
+          let added = store[].addToken(contract.chainId,
             s.view(contract.address), row.decimals, s.view(row.name),
             s.view(row.symbol), s.view(row.logo), s.view(row.crossChainId))
+          if added.isNone:
+            return s.fail("TooLarge")
+          source.rows.add added.get
           source.rowNumbers.add uint32(document.rowIndex)
     inc document.rowIndex
   true
