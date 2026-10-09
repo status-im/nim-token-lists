@@ -434,10 +434,14 @@ func bySymbolOnChainOutput*(
   if symbol.len == 0:
     return err(tklError(InvalidArgument, "BadSymbol"))
   var output = snapshot.output(TokenOutput, 0)
+  # The chain as each store's chain index, so rows compare one integer.
+  let chains = [
+    if snapshot.base.isNil: -1 else: snapshot.base[].chainIds.find(chainId),
+    snapshot.extra.chainIds.find(chainId)]
   for reference in snapshot.tokens:
     let store = snapshot.storeOf(reference)
     let record = unsafeAddr store[].record(reference.indexOf)
-    if store[].chainId(record[]) == chainId and
+    if int(record.chain) == chains[int((uint32(reference) and ExtraRef) != 0)] and
         (store[].equalsIgnoreAsciiCase(record.symbol, symbol) or
         store[].equalsIgnoreAsciiCase(record.name, symbol)):
       output.selected.add reference
