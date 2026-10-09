@@ -2,6 +2,7 @@
 
 import tokenlists/core/[keys, validators]
 import tokenlists/core/parsers/[standard, status, registry]
+import tokenlists/api
 
 proc nimMain() {.importc: "NimMain", cdecl.}
 
@@ -31,4 +32,23 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
       for token in parsed.get.list.tokens:
         doAssert token.chainId in [1'u64, 10]
         doAssert normalizeAddress(token.address).get == token.address
+  # The compact catalogue answers every query with what the parser produced.
+  let config = CatalogueConfig(chains: @[1'u64, 10], initialLists: @[
+    ListContent(id: "list", format: StatusFormat)])
+  let catalogue = initCatalogue(config,
+    [SourceBody(id: "list", origin: BundledBody, body: input)], limits = limits)
+  if catalogue.isOk:
+    discard catalogue.get.getByKey(input)
+    let all = catalogue.get.getAll().get.items
+    var pairs: seq[TokenIdentity]
+    for token in all:
+      pairs.add TokenIdentity(chainId: token.chainId, address: token.address)
+      doAssert catalogue.get.getByKey($token.chainId & "-" & token.address).get == token
+    doAssert catalogue.get.getByChainAddresses(pairs).get.items == all
+    var listed = 0
+    for list in catalogue.get.getLists().items:
+      listed += list.tokens.len
+    doAssert listed >= all.len
+    if status.isOk:
+      doAssert catalogue.get.getList("list").get.tokens == status.get.list.tokens
   0

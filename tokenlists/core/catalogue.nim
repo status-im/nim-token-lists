@@ -70,9 +70,10 @@ func revision*(catalogue: Catalogue): uint64 =
   if catalogue.current.isNil: 0'u64 else: catalogue.current[].revision
 func epoch*(catalogue: Catalogue): uint64 = catalogue.configEpoch
 func snapshot*(catalogue: Catalogue): Snapshot =
-  ## Explicit owned copy for retention. Hot queries should use the forwarding
-  ## functions below while the caller holds its read lock.
-  catalogue.current[]
+  ## Explicit owned copy for retention, sharing nothing with the catalogue.
+  ## Hot queries should use the forwarding functions below while the caller
+  ## holds its read lock.
+  catalogue.current[].detached
 func published*(catalogue: Catalogue): SnapshotRef =
   ## The current snapshot itself, shared rather than copied. See `SnapshotRef`.
   catalogue.current
@@ -102,6 +103,11 @@ func getByKeys*(
     catalogue: Catalogue, keys: openArray[string]
 ): Result[Page[Token], TklError] =
   catalogue.current[].getByKeys(keys)
+
+func getByChainAddresses*(
+    catalogue: Catalogue, pairs: openArray[TokenIdentity]
+): Result[Page[Token], TklError] =
+  catalogue.current[].getByChainAddresses(pairs)
 
 func getList*(catalogue: Catalogue, id: string): Result[TokenList, TklError] =
   catalogue.current[].getList(id)
