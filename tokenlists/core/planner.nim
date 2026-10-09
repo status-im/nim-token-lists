@@ -262,13 +262,9 @@ proc putBody*(
   if body.len > planner.limits.maxBytes:
     received.tooLarge = true
   elif format.get == RegistryFormat:
-    let valid = validateDocument(body, RegistryFormat, requestId, planner.limits)
-    if valid.isErr:
-      received.error = valid.error
-    else:
-      let parsed = parseRegistry(body, requestId, planner.limits)
-      if parsed.isErr: received.error = parsed.error
-      else: received.registry = parsed.get
+    let parsed = validRegistry(body, requestId, planner.limits)
+    if parsed.isErr: received.error = parsed.error
+    else: received.registry = parsed.get
   else:
     var parsed = fetchedListBody(body, format.get, requestId, planner.limits)
     if parsed.isErr: received.error = parsed.error

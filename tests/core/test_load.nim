@@ -1,6 +1,7 @@
 import std/[unittest, sequtils]
 import tokenlists/api
 import tokenlists/core/parsers/lists
+import tokenlists/core/jsoncodec
 
 func listBody(symbol: string): string =
   """{"name":"List","timestamp":"2026-01-01T00:00:00Z","version":{"major":1,"minor":0,"patch":0},"tokens":[{"chainId":1,"address":"0x0000000000000000000000000000000000000001","name":"""" &
@@ -87,6 +88,22 @@ suite "load transactions":
       "UnknownStoredList"
     check beginLoad(config, @[ListContent(id: "native")]).error.detail ==
       "InvalidStoredListId"
+
+  test "a registry body is decoded once":
+    var load = beginLoad(config, stored).get
+    decodedDocuments = 0
+    load.loadList("registry", StoredBody, RegistryBody).get
+    check decodedDocuments == 1
+    var bundled = beginLoad(config, @[]).get
+    bundled.loadList("main", BundledBody, listBody("BUNDLED")).get
+    decodedDocuments = 0
+    bundled.loadList("registry", BundledBody, RegistryBody).get
+    check decodedDocuments == 1
+    var catalogue = finishLoad(move(bundled)).get
+    let plan = catalogue.refreshPlan(10, force = true).get
+    decodedDocuments = 0
+    catalogue.refreshPutBody(plan.id, "registry", RegistryBody).get
+    check decodedDocuments == 1
 
   test "the registry prefers a valid stored copy over the bundled one":
     for (storedRegistry, etag) in [(RegistryBody, "r1"), ("broken", "")]:
