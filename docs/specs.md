@@ -100,8 +100,8 @@ token order and alias behavior. Custom preparation computes the change before
 the persistence handshake, so commit does not repeat the diff.
 
 Catalogue state belongs to its caller, which must synchronize mutations and
-snapshot acquisition. Once acquired, a value snapshot remains valid across
-later publications. The existing read/write lock gives queued writers priority
+snapshot acquisition. Once acquired, a published snapshot (a shared immutable
+reference) or a `detached` copy remains valid across later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
 Each publication builds one new immutable snapshot; none is changed afterwards.

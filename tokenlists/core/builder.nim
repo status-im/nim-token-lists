@@ -257,6 +257,7 @@ proc refreshSources*(
     previousIndex[entry.origin.id] = index
   for index, update in updates:
     updateIndex[update.meta.id] = index
+  # Any update replaces its entry's rows, even when the list order holds.
   var unchanged = updates.len == 0 and order.len == previous.sources.len
   for slot, id in order:
     if id notin updateIndex and id notin previousIndex:
