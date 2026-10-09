@@ -6,9 +6,9 @@
 ## straight into a token store. tests/oracle keeps that decoder for
 ## differential tests and fuzzing.
 
-import std/[strutils, unicode, uri]
+import std/[algorithm, math, strutils, unicode, uri]
 from json_serialization/lexer import JsonErrorKind
-import ../[types, errors, keys, store]
+import ../[types, errors, keys, store, hashing]
 import ./common
 export common
 
@@ -64,6 +64,8 @@ type
     text: seq[char]
       ## Decoded escaped strings of the current row.
     contracts: seq[Contract]
+    contractSlots: seq[uint32]
+      ## Contract index + 1 by chain id once a row has many contracts.
 
   Field = enum
     OtherField, NameField, TimestampField, VersionField, TagsField, LogoField,
@@ -851,6 +853,44 @@ proc normalized(s: Scanner, first, last: int): string =
         else: result.add byte
       result.add '"'
 
+proc seenContract(s: Scanner, chainId: uint64): bool =
+  ## Whether an earlier contract of the row has `chainId`.
+  if s.contracts.len < ManyKeys:
+    for contract in s.contracts:
+      countProbe()
+      if contract.chainId == chainId:
+        return true
+    return false
+  let mask = uint64(s.contractSlots.len - 1)
+  var slot = mix64(chainId) and mask
+  while s.contractSlots[slot] != 0:
+    countProbe()
+    if s.contracts[s.contractSlots[slot] - 1].chainId == chainId:
+      return true
+    slot = (slot + 1) and mask
+  false
+
+proc addContract(s: var Scanner, contract: Contract) =
+  s.contracts.add contract
+  if s.contracts.len < ManyKeys:
+    return
+  var first = s.contracts.high
+  if s.contracts.len == ManyKeys or 2 * s.contracts.len > s.contractSlots.len:
+    s.contractSlots.setLen(0)
+    s.contractSlots.setLen(nextPowerOfTwo(4 * s.contracts.len))
+    first = 0
+  let mask = uint64(s.contractSlots.len - 1)
+  for index in first ..< s.contracts.len:
+    var slot = mix64(s.contracts[index].chainId) and mask
+    while s.contractSlots[slot] != 0:
+      countProbe()
+      slot = (slot + 1) and mask
+    s.contractSlots[slot] = uint32(index + 1)
+
+func byChainId(a, b: Contract): int =
+  countProbe()
+  cmp(a.chainId, b.chainId)
+
 proc contractsValue(
     s: var Scanner, kind: Kind, faults: var Faults, modes: set[Mode]
 ): bool =
@@ -874,10 +914,8 @@ proc contractsValue(
       chainId = chainId * 10 + digit
     if not valid:
       faults.fault(modes, "BadContractChainId")
-    else:
-      for contract in s.contracts:
-        if contract.chainId == chainId:
-          faults.fault(modes, "DuplicateContractChainId")
+    elif s.seenContract(chainId):
+      faults.fault(modes, "DuplicateContractChainId")
     var valueKind: Kind
     if not s.kindAt(valueKind):
       return false
@@ -885,15 +923,19 @@ proc contractsValue(
     if not s.stringValue(valueKind, faults, modes, {}, address):
       return false
     if valid:
-      s.contracts.add Contract(chainId: chainId, address: address)
+      s.addContract Contract(chainId: chainId, address: address)
   # Stable order by chain id, like the decoder's sort.
-  for index in 1 ..< s.contracts.len:
-    var position = index
-    let contract = s.contracts[index]
-    while position > 0 and s.contracts[position - 1].chainId > contract.chainId:
-      s.contracts[position] = s.contracts[position - 1]
-      dec position
-    s.contracts[position] = contract
+  if s.contracts.len >= ManyKeys:
+    s.contracts.sort(byChainId)
+  else:
+    for index in 1 ..< s.contracts.len:
+      var position = index
+      let contract = s.contracts[index]
+      while position > 0 and s.contracts[position - 1].chainId > contract.chainId:
+        countProbe()
+        s.contracts[position] = s.contracts[position - 1]
+        dec position
+      s.contracts[position] = contract
   true
 
 proc rowValue(
