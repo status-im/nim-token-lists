@@ -4,7 +4,7 @@
 ## interned byte arena. Build tables are dropped by `freeze`; a frozen store is
 ## immutable and may be shared between snapshots and reader threads.
 
-import ./[types, jsonout]
+import ./[types, jsonout, hashing]
 export types, jsonout
 
 type
@@ -91,19 +91,12 @@ func retainedBytes*(store: TokenStore): int =
     8 * (store.chainIds.capacity + store.escaped.capacity) +
     sizeof(TokenRecord) * store.records.capacity
 
-func mix(hash: uint64, value: uint64): uint64 {.inline.} =
-  (hash xor value) * 0x100000001B3'u64
+func hashText*(text: openArray[char], seed = hashSeed): uint64 {.inline.} =
+  hashBytes(text, seed)
 
-func hashText(text: openArray[char]): uint64 =
-  result = 0xCBF29CE484222325'u64
-  for ch in text:
-    result = mix(result, uint64(ord(ch)))
-
-func hashRecord(record: TokenRecord): uint64 =
-  result = 0xCBF29CE484222325'u64
-  let bytes = cast[ptr array[sizeof(TokenRecord), byte]](unsafeAddr record)
-  for value in bytes[]:
-    result = mix(result, uint64(value))
+func hashRecord*(record: TokenRecord, seed = hashSeed): uint64 =
+  let bytes = cast[ptr array[sizeof(TokenRecord), char]](unsafeAddr record)
+  hashBytes(bytes[], seed)
 
 func span(store: TokenStore, id: TextId): (int, int) {.inline.} =
   let index = int(uint32(id))
@@ -141,6 +134,7 @@ proc rehashTexts(store: var TokenStore) =
     let (first, last) = store.span(TextId(uint32(id)))
     var slot = hashText(store.bytes.toOpenArray(first, last - 1)) and mask
     while store.textSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.textSlots[slot] = uint32(id)
 
@@ -149,6 +143,7 @@ proc findText(store: TokenStore, text: openArray[char], slot: var uint64): int =
   let mask = uint64(store.textSlots.len - 1)
   slot = hashText(text) and mask
   while store.textSlots[slot] != 0:
+    countProbe()
     let id = TextId(store.textSlots[slot])
     if store.textEquals(id, text):
       return int(uint32(id))
@@ -253,11 +248,8 @@ func sameLogo(a: TokenStore, ar: TokenRecord, b: TokenStore, br: TokenRecord): b
       return false
   true
 
-func hashChain(chainId: uint64): uint64 {.inline.} =
-  ## splitmix64: ids differing only in high bits still spread over slots.
-  result = (chainId xor (chainId shr 30)) * 0xBF58476D1CE4E5B9'u64
-  result = (result xor (result shr 27)) * 0x94D049BB133111EB'u64
-  result = result xor (result shr 31)
+func hashChain*(chainId: uint64, seed = hashSeed): uint64 {.inline.} =
+  hashValue(chainId, seed)
 
 proc rehashChains(store: var TokenStore) =
   store.chainSlots = newSeq[uint32](max(16, store.chainSlots.len * 2))
@@ -265,6 +257,7 @@ proc rehashChains(store: var TokenStore) =
   for index, chainId in store.chainIds:
     var slot = hashChain(chainId) and mask
     while store.chainSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.chainSlots[slot] = uint32(index + 1)
 
@@ -275,6 +268,7 @@ proc chainIndex(store: var TokenStore, chainId: uint64): uint32 =
   let mask = uint64(store.chainSlots.len - 1)
   var slot = hashChain(chainId) and mask
   while store.chainSlots[slot] != 0:
+    countProbe()
     let index = store.chainSlots[slot] - 1
     if store.chainIds[index] == chainId:
       return index
@@ -321,6 +315,7 @@ proc rehashRecords(store: var TokenStore) =
   for index, record in store.records:
     var slot = hashRecord(record) and mask
     while store.recordSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.recordSlots[slot] = uint32(index + 1)
 
@@ -332,6 +327,7 @@ proc addRecord(store: var TokenStore, record: TokenRecord): uint32 =
   let mask = uint64(store.recordSlots.len - 1)
   var slot = hashRecord(record) and mask
   while store.recordSlots[slot] != 0:
+    countProbe()
     let index = store.recordSlots[slot] - 1
     if store.records[index] == record:
       return index

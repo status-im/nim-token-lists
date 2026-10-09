@@ -495,11 +495,8 @@ proc scanLiteral(s: var Scanner, word: string, error: JsonErrorKind): bool =
 
 proc skipValue(s: var Scanner, kind: Kind): bool
 
-func keyHash(text: openArray[char]): uint32 =
-  var hash = 0x811C9DC5'u32
-  for ch in text:
-    hash = (hash xor uint32(ord(ch))) * 0x01000193'u32
-  hash
+func keyHash*(text: openArray[char], seed = hashSeed): uint32 {.inline.} =
+  uint32(hashBytes(text, seed))
 
 template keyText(s: Scanner, slot: KeySlot): openArray[char] =
   if slot.decoded: s.keyBytes.toOpenArray(slot.start, slot.start + slot.len - 1)
@@ -528,6 +525,7 @@ proc indexKeys(s: var Scanner, frame: int) =
   for index in frame ..< s.keys.len:
     var slot = s.keys[index].hash and mask
     while s.tables[level][slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     s.tables[level][slot] = uint32(index + 1)
 
@@ -552,6 +550,7 @@ proc addKey(s: var Scanner, raw: Text, escaped: bool, frame: int): bool =
   let mask = uint32(s.tables[level].len - 1)
   var position = slot.hash and mask
   while s.tables[level][position] != 0:
+    countProbe()
     if s.sameKey(s.keys[s.tables[level][position] - 1], slot):
       return s.fail("DuplicateObjectField")
     position = (position + 1) and mask
@@ -862,7 +861,7 @@ proc seenContract(s: Scanner, chainId: uint64): bool =
         return true
     return false
   let mask = uint64(s.contractSlots.len - 1)
-  var slot = mix64(chainId) and mask
+  var slot = hashValue(chainId, hashSeed) and mask
   while s.contractSlots[slot] != 0:
     countProbe()
     if s.contracts[s.contractSlots[slot] - 1].chainId == chainId:
@@ -881,7 +880,7 @@ proc addContract(s: var Scanner, contract: Contract) =
     first = 0
   let mask = uint64(s.contractSlots.len - 1)
   for index in first ..< s.contracts.len:
-    var slot = mix64(s.contracts[index].chainId) and mask
+    var slot = hashValue(s.contracts[index].chainId, hashSeed) and mask
     while s.contractSlots[slot] != 0:
       countProbe()
       slot = (slot + 1) and mask
