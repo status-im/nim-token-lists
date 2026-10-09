@@ -2,8 +2,8 @@
 
 import std/[algorithm, sets, tables]
 import ./[types, keys, snapshot]
-import ./parsers/[common, standard, status]
-export types, snapshot
+import ./parsers/lists
+export types, snapshot, ParsedContent
 
 const DefaultNativeLogo =
   "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/" &
@@ -33,43 +33,47 @@ type
     reused: seq[int]
     unchanged: bool
 
-when defined(tklCountParses):
-  # Test-only probe: list documents decoded while building catalogues.
-  var parsedContents* {.threadvar.}: int
+  SourceBody* = object
+    ## Convenience load input for Nim callers. The C ABI borrows host bytes.
+    id*: string
+    origin*: BodyOrigin
+    body*: string
 
-func origin(content: ListContent, format: ListFormat): SourceOrigin =
+  ParsedBody = object
+    received: bool
+    bodyLen: int
+    parsed: Result[ParsedSource, TklError]
+
+  LoadedList = object
+    bundled, stored: ParsedBody
+
+  LoadedSources* = object
+    ## Lists parsed during a load, by id and origin. Bodies are not kept.
+    order: seq[string]
+    initial, cached, slots: Table[string, int]
+    lists: seq[LoadedList]
+
+func origin(content: ListContent, format: ListFormat, bodyLen: int): SourceOrigin =
   SourceOrigin(id: content.id, format: format, source: content.source,
     fetchedTimestamp: content.fetchedTimestamp, etag: content.etag,
-    fetchedAt: content.fetchedAt, bodyLen: content.body.len)
+    fetchedAt: content.fetchedAt, bodyLen: bodyLen)
 
 proc parseContent(
-    content: ListContent, format: ListFormat, limits: ParseLimits
+    content: ListContent, body: openArray[char], format: ListFormat,
+    limits: ParseLimits
 ): Result[ParsedSource, TklError] =
-  when defined(tklCountParses):
-    inc parsedContents
   if content.failure.code != Ok:
     return err(tklError(content.failure.code, content.failure.detail, content.id))
-  if content.body.len == 0:
-    return err(tklError(InvalidContent, "EmptyListContent", content.id))
-  let parsed = case format
-    of StandardFormat: decodeStandardSource(content.body, content.id, limits)
-    of StatusFormat: decodeStatusSource(content.body, content.id, limits)
-    of RegistryFormat:
-      err(tklError(UnsupportedSchema, "RegistryIsNotTokenList", content.id))
-  var value = ?parsed
+  var value = ?parseListBody(body, format, content.id, limits)
   value.list.source = content.source
   value.list.fetchedTimestamp = content.fetchedTimestamp
   ok(value)
 
-proc reparseCatalogueSources*(
-    previous: ParsedCatalogue, config: CatalogueConfig, stored: seq[ListContent],
-    changed: HashSet[string], limits = DefaultParseLimits
-): Result[SourceRefresh, TklError] =
-  ## Parses like `parseCatalogueSources`, reusing entries of `previous` whose
-  ## content identity is unchanged. `changed` must name every list whose body
-  ## may differ from the content `previous` was parsed from. Reused entries stay
-  ## in `previous` until `adoptSources`, so no parsed list is copied.
-  var initial, cached: Table[string, int]
+proc sourceOrder(
+    config: CatalogueConfig, stored: openArray[ListContent],
+    initial, cached: var Table[string, int]
+): Result[seq[string], TklError] =
+  ## Native and custom are synthetic; the registry is not a token list.
   for index, source in config.initialLists:
     if source.id.len == 0 or source.id in ["native", "custom", config.registryId] or
         source.id in initial:
@@ -99,60 +103,129 @@ proc reparseCatalogueSources*(
       ids.add id
   ids.sort()
   order.add ids
-  # Only clean entries are reusable: one with failures fell back or was dropped,
-  # so its first-choice content must be parsed again.
-  var reusable: Table[string, int]
+  ok(order)
+
+proc initLoadedSources*(
+    config: CatalogueConfig, stored: openArray[ListContent]
+): Result[LoadedSources, TklError] =
+  var sources: LoadedSources
+  sources.order = ?sourceOrder(config, stored, sources.initial, sources.cached)
+  sources.lists.setLen(sources.order.len)
+  for slot, id in sources.order:
+    sources.slots[id] = slot
+  ok(sources)
+
+proc loadBody*(
+    sources: var LoadedSources, config: CatalogueConfig,
+    stored: openArray[ListContent], id: string, origin: BodyOrigin,
+    body: openArray[char], limits: ParseLimits
+): Result[void, TklError] =
+  ## Parses a body at most once while it is borrowed. A bundled body is parsed
+  ## only while no usable stored copy of that list has been loaded.
+  let known = if origin == BundledBody: id in sources.initial else: id in sources.cached
+  if not known:
+    return err(tklError(InvalidArgument,
+      if origin == BundledBody: "UnknownInitialList" else: "UnknownStoredList", id))
+  let list = addr sources.lists[sources.slots.getOrDefault(id)]
+  let target = if origin == BundledBody: addr list.bundled else: addr list.stored
+  if target.received:
+    return err(tklError(InvalidArgument, "DuplicateListBody", id))
+  target[] = ParsedBody(received: true, bodyLen: body.len,
+    parsed: Result[ParsedSource, TklError].err(tklError(Ok, "", id)))
+  if origin == StoredBody:
+    let content = stored[sources.cached.getOrDefault(id)]
+    let format = if id in sources.initial:
+        config.initialLists[sources.initial.getOrDefault(id)].format
+      else: content.format
+    target.parsed = parseContent(content, body, format, limits)
+    if target.parsed.isOk:
+      # A usable stored copy wins; drop a bundled one parsed before it.
+      list.bundled.parsed = Result[ParsedSource, TklError].err(tklError(Ok, "", id))
+  elif not (list.stored.received and list.stored.parsed.isOk):
+    let content = config.initialLists[sources.initial.getOrDefault(id)]
+    target.parsed = parseContent(content, body, content.format, limits)
+  ok()
+
+proc finishSources*(
+    sources: var LoadedSources, config: CatalogueConfig,
+    stored: openArray[ListContent]
+): Result[(ParsedCatalogue, seq[ListContent]), TklError] =
+  ## Picks each stored list if it parsed, else its bundled list. Also returns
+  ## the committed metadata of every usable list, for refresh planning.
+  var parsed: ParsedCatalogue
+  var contents = config.initialLists
+  var usableStored: HashSet[string]
+  for slot, id in sources.order:
+    var entry = CachedSource(origin: SourceOrigin(id: id))
+    let list = addr sources.lists[slot]
+    if id in sources.cached:
+      let content = stored[sources.cached.getOrDefault(id)]
+      if content.failure.code != Ok:
+        entry.failures.add tklError(content.failure.code, content.failure.detail, id)
+      elif not list.stored.received:
+        entry.failures.add tklError(InvalidContent, "MissingListBody", id)
+      elif list.stored.parsed.isErr:
+        entry.failures.add list.stored.parsed.error
+      else:
+        var meta = content
+        if id in sources.initial:
+          meta.format = config.initialLists[sources.initial.getOrDefault(id)].format
+          contents[sources.initial.getOrDefault(id)] = meta
+        else:
+          usableStored.incl id
+        entry.origin = origin(meta, meta.format, list.stored.bodyLen)
+        entry.source = move(list.stored.parsed.value)
+        entry.usable = true
+    if not entry.usable and id in sources.initial:
+      let content = config.initialLists[sources.initial.getOrDefault(id)]
+      if not list.bundled.received:
+        return err(tklError(InvalidContent, "MissingListBody", id))
+      if list.bundled.parsed.isErr:
+        return err(list.bundled.parsed.error)
+      entry.origin = origin(content, content.format, list.bundled.bodyLen)
+      entry.source = move(list.bundled.parsed.value)
+      entry.usable = true
+    if not entry.usable and id == config.mainListId:
+      return err(entry.failures[^1])
+    parsed.sources.add entry
+  sources.lists.setLen(0)
+  for content in stored:
+    if content.id in usableStored:
+      contents.add content
+  ok((parsed, contents))
+
+proc refreshSources*(
+    previous: ParsedCatalogue, config: CatalogueConfig,
+    contents: openArray[ListContent], updates: var seq[ParsedContent]
+): Result[SourceRefresh, TklError] =
+  ## Lists in `updates` replace their entries; every other list in `contents`
+  ## reuses its parsed entry from `previous`, which stays there until
+  ## `adoptSources`, so no parsed list is copied and no body is needed.
+  var initial, cached: Table[string, int]
+  let order = ?sourceOrder(config, contents, initial, cached)
+  var previousIndex, updateIndex: Table[string, int]
   for index, entry in previous.sources:
-    if entry.usable and entry.failures.len == 0:
-      reusable[entry.origin.id] = index
+    previousIndex[entry.origin.id] = index
+  for index, update in updates:
+    updateIndex[update.meta.id] = index
   var output = SourceRefresh(unchanged: order.len == previous.sources.len)
   for id in order:
     var entry: CachedSource
     var reused = -1
-    let format = if id in initial:
-        config.initialLists[initial.getOrDefault(id)].format
-      elif id in cached: stored[cached.getOrDefault(id)].format
-      else: StandardFormat
-    template storedContent: untyped = stored[cached.getOrDefault(id)]
-    template initialContent: untyped = config.initialLists[initial.getOrDefault(id)]
-    if id notin changed and id in reusable:
-      let index = reusable.getOrDefault(id)
-      let first =
-        if id in cached: storedContent.origin(format)
-        else: initialContent.origin(format)
-      if previous.sources[index].origin == first:
-        reused = index
-    if reused < 0:
-      var parsed = Result[ParsedSource, TklError].err(
-        tklError(NotFound, "MissingStoredList", id))
-      if id in cached:
-        parsed = parseContent(storedContent, format, limits)
-        if parsed.isErr:
-          entry.failures.add parsed.error
-        else:
-          entry.origin = storedContent.origin(format)
-      if parsed.isErr and id in initial:
-        parsed = parseContent(initialContent, initialContent.format, limits)
-        if parsed.isOk:
-          entry.origin = initialContent.origin(initialContent.format)
-      if parsed.isErr:
-        if id in initial or id == config.mainListId:
-          return err(parsed.error)
-      else:
-        entry.source = parsed.get
-        entry.usable = true
+    if id in updateIndex:
+      let update = addr updates[updateIndex.getOrDefault(id)]
+      entry.origin = origin(update.meta, update.meta.format, update.bodyLen)
+      entry.source = move(update.source)
+      entry.usable = true
+    elif id in previousIndex:
+      reused = previousIndex.getOrDefault(id)
+    else:
+      return err(tklError(Internal, "MissingParsedList", id))
     if reused != output.reused.len:
       output.unchanged = false
     output.reused.add reused
     output.parsed.sources.add entry
   ok(output)
-
-proc parseCatalogueSources*(
-    config: CatalogueConfig, stored: seq[ListContent] = @[],
-    limits = DefaultParseLimits
-): Result[ParsedCatalogue, TklError] =
-  ok((?reparseCatalogueSources(ParsedCatalogue(), config, stored,
-    initHashSet[string](), limits)).parsed)
 
 func unchanged*(refresh: SourceRefresh): bool =
   ## Every entry of the previous catalogue is reused in its existing order.
@@ -240,10 +313,19 @@ proc buildFromRefresh*(
     if index >= 0:
       swap(refresh.parsed.sources[slot], previous.sources[index])
 
+proc loadSources*(
+    config: CatalogueConfig, bodies: openArray[SourceBody],
+    stored: openArray[ListContent], limits: ParseLimits
+): Result[(ParsedCatalogue, seq[ListContent]), TklError] =
+  var sources = ?initLoadedSources(config, stored)
+  for body in bodies:
+    ?sources.loadBody(config, stored, body.id, body.origin, body.body, limits)
+  sources.finishSources(config, stored)
+
 proc buildCatalogue*(
-    config: CatalogueConfig, stored: seq[ListContent] = @[],
-    customs: seq[Token] = @[], revision = 1'u64,
+    config: CatalogueConfig, bodies: openArray[SourceBody] = [],
+    stored: seq[ListContent] = @[], customs: seq[Token] = @[], revision = 1'u64,
     limits = DefaultParseLimits
 ): Result[Snapshot, TklError] =
-  let parsed = ?parseCatalogueSources(config, stored, limits)
+  let (parsed, _) = ?loadSources(config, bodies, stored, limits)
   buildFromParsed(parsed, config.chains, config.policy, customs, revision)

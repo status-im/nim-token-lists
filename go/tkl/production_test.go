@@ -15,7 +15,7 @@ func TestProductionCatalogue(t *testing.T) {
 	if _, err = h.GetAll(0, 0); !errors.Is(err, InvalidArgument) {
 		t.Fatalf("unloaded: %v", err)
 	}
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	page, err := h.GetAll(0, 0)
@@ -38,25 +38,22 @@ func TestProductionCatalogue(t *testing.T) {
 	}
 }
 
-func TestCreateChecksEmbeddedDocumentByteLimits(t *testing.T) {
-	limits := Limits{MaxBytes: 64, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
-	for _, config := range []Config{
-		{InitialLists: []ListContent{{ID: "large", Body: strings.Repeat(" ", 65)}}},
-		{RegistryID: "registry", EmbeddedRegistry: strings.Repeat(" ", 65)},
-	} {
+func TestLoadChecksDocumentByteLimits(t *testing.T) {
+	limits := Limits{MaxBytes: 128, MaxDepth: 8, MaxArrayItems: 20, MaxObjectMembers: 20, MaxStringBytes: 64}
+	config := Config{MainListID: "main", InitialLists: []ListContent{{ID: "main"}}}
+	document := `{"tokens":[]}`
+	for size, ok := range map[int]bool{128: true, 129: false} {
 		h, err := CreateWithLimits(config, &limits)
-		if h != nil {
-			_ = h.Destroy()
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !errors.Is(err, InvalidArgument) {
-			t.Fatalf("oversized embedded document accepted: %v", err)
+		body := []byte(document + strings.Repeat(" ", size-len(document)))
+		_, err = h.LoadStored(Bootstrap{}, []ListBody{{ID: "main", Origin: Bundled, Data: body}})
+		if ok != (err == nil) || (!ok && !errors.Is(err, InvalidArgument)) {
+			t.Fatalf("%d byte document: %v", size, err)
 		}
+		_ = h.Destroy()
 	}
-	h, err := CreateWithLimits(Config{InitialLists: []ListContent{{ID: "boundary", Body: strings.Repeat(" ", 64)}}}, &limits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Destroy()
 }
 
 func TestNoArgumentQueriesSendObjectEnvelopes(t *testing.T) {
@@ -79,18 +76,18 @@ func TestFetchEnvelopeAllowsDocumentsWithinByteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := h.RefreshPlan(10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: registryBody}}, 11)
+	more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: []byte(registryBody)}}, 11)
 	if err != nil || more.Step != "NeedMore" {
 		t.Fatal(more, err)
 	}
-	ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 200, Body: listBody}}, 12)
+	ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 200, Body: []byte(listBody)}}, 12)
 	if err != nil || ready.Step != "Ready" {
 		t.Fatal(ready, err)
 	}

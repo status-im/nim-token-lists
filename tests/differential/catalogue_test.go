@@ -58,12 +58,12 @@ func converted(list *sdk.TokenList) []tkl.Token {
 func compare(t *testing.T, body, format string) {
 	t.Helper()
 	expected := sdkList(t, body, format)
-	h, err := tkl.Create(tkl.Config{Chains: chains, MainListID: "test", InitialLists: []tkl.ListContent{{ID: "test", Format: format, Body: body}}})
+	h, err := tkl.Create(tkl.Config{Chains: chains, MainListID: "test", InitialLists: []tkl.ListContent{{ID: "test", Format: format}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.LoadStored(tkl.Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(tkl.Bootstrap{}, []tkl.ListBody{{ID: "test", Origin: tkl.Bundled, Data: []byte(body)}}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := h.GetList("test")
@@ -130,6 +130,7 @@ func TestPortedTokenFixtures(t *testing.T) {
 func TestCompleteCatalogue(t *testing.T) {
 	files, _ := filepath.Glob("../../fixtures/embedded/*.json")
 	config := tkl.Config{Chains: chains, MainListID: "status"}
+	var bodies []tkl.ListBody
 	expected := map[string]tkl.Token{}
 	// Native tokens and first-source precedence are separate from parser parity.
 	for _, chain := range chains {
@@ -152,7 +153,8 @@ func TestCompleteCatalogue(t *testing.T) {
 			format = tkl.StatusFormat
 		}
 		body := read(t, file)
-		config.InitialLists = append(config.InitialLists, tkl.ListContent{ID: id, Format: format, Body: body})
+		config.InitialLists = append(config.InitialLists, tkl.ListContent{ID: id, Format: format})
+		bodies = append(bodies, tkl.ListBody{ID: id, Origin: tkl.Bundled, Data: []byte(body)})
 		for _, token := range converted(sdkList(t, body, format)) {
 			key := fmt.Sprintf("%d-%s", token.ChainID, token.Address)
 			if _, exists := expected[key]; !exists {
@@ -165,7 +167,7 @@ func TestCompleteCatalogue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.LoadStored(tkl.Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(tkl.Bootstrap{}, bodies); err != nil {
 		t.Fatal(err)
 	}
 	all, err := h.GetAll(0, 0)
@@ -202,14 +204,14 @@ func TestRegistryFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer h.Destroy()
-			if _, err = h.LoadStored(tkl.Bootstrap{}); err != nil {
+			if _, err = h.LoadStored(tkl.Bootstrap{}, nil); err != nil {
 				t.Fatal(err)
 			}
 			plan, err := h.RefreshPlan(10, true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := h.RefreshApply(plan.ID, []tkl.FetchResult{{ID: "registry", Status: 200, Body: body}}, 11)
+			report, err := h.RefreshApply(plan.ID, []tkl.FetchResult{{ID: "registry", Status: 200, Body: []byte(body)}}, 11)
 			if err != nil || len(report.Requests) != len(reference.TokenLists) {
 				t.Fatal(report, err)
 			}
@@ -234,14 +236,14 @@ func TestSchemaFixturesRemainData(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer h.Destroy()
-			if _, err = h.LoadStored(tkl.Bootstrap{}); err != nil {
+			if _, err = h.LoadStored(tkl.Bootstrap{}, nil); err != nil {
 				t.Fatal(err)
 			}
 			plan, err := h.RefreshPlan(10, true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := h.RefreshApply(plan.ID, []tkl.FetchResult{{ID: "registry", Status: 200, Body: string(body)}}, 11)
+			report, err := h.RefreshApply(plan.ID, []tkl.FetchResult{{ID: "registry", Status: 200, Body: body}}, 11)
 			if err != nil || report.Step != "Ready" || len(report.Sources) != 2 || report.Sources[1].Outcome != "UnsupportedSchema" {
 				t.Fatal(report, err)
 			}

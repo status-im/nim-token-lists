@@ -1,5 +1,5 @@
 import std/[unittest, strutils]
-import ../../tokenlists/core/catalogue
+import ../../tokenlists/api
 
 const address = "0x000000000000000000000000000000000000000a"
 func custom(symbol = "CUSTOM"): Token =
@@ -22,6 +22,22 @@ suite "catalogue publication and custom transactions":
     var token = catalogue.getByKey("1-" & address).get
     token.symbol = "COPY"
     check catalogue.getByKey("1-" & address).get.symbol == "CUSTOM"
+
+  test "published snapshots are shared until replaced and never mutated":
+    var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+    let first = catalogue.published
+    check first == catalogue.published
+    discard catalogue.setChains(@[10'u64]).get
+    let second = catalogue.published
+    check second != first
+    check first[].getNative(1).isOk
+    check second[].getNative(10).isOk
+    let mutation = catalogue.customValidateUpsert(Token(chainId: 10,
+      address: address, symbol: "C", decimals: 18)).get
+    check catalogue.published == second
+    discard catalogue.customCommit(mutation.id).get
+    check catalogue.published != second
+    check second[].getByKey("10-" & address).isErr
 
   test "duplicate custom identities are rejected before publication":
     var duplicate = custom("DUPLICATE")
@@ -82,7 +98,8 @@ suite "catalogue publication and custom transactions":
     let body = "{\"tokens\":[{\"chainId\":1,\"address\":\"" & address &
       "\",\"symbol\":\"CURATED\",\"decimals\":18}]}"
     var catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64],
-      initialLists: @[ListContent(id: "main", body: body)])).get
+      initialLists: @[ListContent(id: "main")]),
+      [SourceBody(id: "main", origin: BundledBody, body: body)]).get
     let mutation = catalogue.customValidateUpsert(custom()).get
     discard catalogue.customCommit(mutation.id).get
     check catalogue.snapshot.getByKey("1-" & address).get.symbol == "CURATED"

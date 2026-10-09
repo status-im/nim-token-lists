@@ -17,7 +17,10 @@ int main(void) {
   const char* config = "{\"config\":{\"chains\":[1]}}";
   assert(tkl_create(TKL_ABI_VERSION, config, strlen(config), &h, &buf) == TKL_OK);
   tkl_buf_free(&buf);
-  assert(tkl_load_stored(h, "{}", 2, &buf) == TKL_OK);
+  uint64_t txn = 0;
+  assert(tkl_load_begin(h, "{}", 2, &txn, &buf) == TKL_OK);
+  tkl_buf_free(&buf);
+  assert(tkl_load_finish(h, txn, &buf) == TKL_OK);
   tkl_buf_free(&buf);
   assert(tkl_get_all(h, "{}", 2, &buf) == TKL_OK);
   tkl_buf_free(&buf);

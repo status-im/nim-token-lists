@@ -1,7 +1,8 @@
 {.push raises: [], gcsafe.}
 
-import std/sets
 import ./[builder, keys, planner]
+from ./validators import validateDocument
+from ./parsers/registry import parseRegistry
 export builder, planner
 
 type
@@ -29,16 +30,16 @@ type
     revision: uint64
     epoch: uint64
     customs: seq[Token]
-    snapshot: Snapshot
+    snapshot: SnapshotRef
     change: Change
 
   Catalogue* = object
     ## Caller-owned state. Serialize calls that mutate the same instance.
-    ## Queries use independent immutable value snapshots, never shared refs.
+    ## Each publication swaps in one new immutable snapshot; none is mutated.
     config: CatalogueConfig
     parsed: ParsedCatalogue
     customs: seq[Token]
-    current: Snapshot
+    current: SnapshotRef
     configEpoch: uint64
     nextMutation: uint64
     pending: PendingCustom
@@ -46,55 +47,70 @@ type
     planner: Planner
     limits: ParseLimits
     refreshId: uint64
-    refreshSnapshot: Snapshot
+    refreshSnapshot: SnapshotRef
     refreshSources: SourceRefresh
     refreshChange: Change
     refreshDiagnostics: seq[TklError]
     diagnostics: seq[TklError]
 
+  CatalogueLoad* = object
+    ## An open load: bodies are parsed as they are supplied and dropped.
+    config: CatalogueConfig
+    stored: seq[ListContent]
+    customs: seq[Token]
+    limits: ParseLimits
+    state: RefreshState
+    timeoutSec: int64
+    sources: LoadedSources
+    storedRegistry, bundledRegistry: Opt[Result[Registry, TklError]]
+
 const ChangeHistoryLimit = 64
 
-func revision*(catalogue: Catalogue): uint64 = catalogue.current.revision
+func revision*(catalogue: Catalogue): uint64 =
+  if catalogue.current.isNil: 0'u64 else: catalogue.current[].revision
 func epoch*(catalogue: Catalogue): uint64 = catalogue.configEpoch
 func snapshot*(catalogue: Catalogue): Snapshot =
   ## Explicit owned copy for retention. Hot queries should use the forwarding
   ## functions below while the caller holds its read lock.
+  catalogue.current[]
+func published*(catalogue: Catalogue): SnapshotRef =
+  ## The current snapshot itself, shared rather than copied. See `SnapshotRef`.
   catalogue.current
 
 func getByKey*(catalogue: Catalogue, key: string): Result[Token, TklError] =
-  catalogue.current.getByKey(key)
+  catalogue.current[].getByKey(key)
 
 func getByChainAddress*(
     catalogue: Catalogue, chainId: uint64, address: string
 ): Result[Token, TklError] =
-  catalogue.current.getByChainAddress(chainId, address)
+  catalogue.current[].getByChainAddress(chainId, address)
 
 func getNative*(catalogue: Catalogue, chainId: uint64): Result[Token, TklError] =
-  catalogue.current.getNative(chainId)
+  catalogue.current[].getNative(chainId)
 
 func getAll*(
     catalogue: Catalogue, offset = 0, limit = 0
 ): Result[Page[Token], TklError] =
-  catalogue.current.getAll(offset, limit)
+  catalogue.current[].getAll(offset, limit)
 
 func getByChains*(
     catalogue: Catalogue, chains: openArray[uint64], offset = 0, limit = 0
 ): Result[Page[Token], TklError] =
-  catalogue.current.getByChains(chains, offset, limit)
+  catalogue.current[].getByChains(chains, offset, limit)
 
 func getByKeys*(
     catalogue: Catalogue, keys: openArray[string]
 ): Result[Page[Token], TklError] =
-  catalogue.current.getByKeys(keys)
+  catalogue.current[].getByKeys(keys)
 
 func getList*(catalogue: Catalogue, id: string): Result[TokenList, TklError] =
-  catalogue.current.getList(id)
+  catalogue.current[].getList(id)
 
 func getLists*(catalogue: Catalogue): Page[TokenList] =
-  catalogue.current.getLists()
+  catalogue.current[].getLists()
 
 func getDiagnostics*(catalogue: Catalogue): Page[TklError] =
-  catalogue.current.getDiagnostics()
+  catalogue.current[].getDiagnostics()
 
 func describeChange(
     before, after: Snapshot, kind: ChangeKind
@@ -104,7 +120,7 @@ func describeChange(
     chains: delta.chains, lists: delta.lists)
 
 proc publish(
-    catalogue: var Catalogue, next: sink Snapshot, change: Change
+    catalogue: var Catalogue, next: sink SnapshotRef, change: Change
 ): Change =
   catalogue.current = next
   if catalogue.history.len == ChangeHistoryLimit:
@@ -112,17 +128,69 @@ proc publish(
   catalogue.history.add change
   change
 
-proc initCatalogue*(
+proc beginLoad*(
     config: CatalogueConfig, stored: seq[ListContent] = @[],
     customs: seq[Token] = @[], limits = DefaultParseLimits,
     refreshState = RefreshState(), planTimeoutSec = 300'i64
-): Result[Catalogue, TklError] =
-  let parsed = ?parseCatalogueSources(config, stored, limits)
-  let snapshot = ?buildFromParsed(parsed, config.chains, config.policy, customs, 1)
-  var catalogue = Catalogue(config: config, parsed: parsed,
-    customs: customs, nextMutation: 1, limits: limits,
-    planner: ?initPlanner(config, stored, limits, refreshState, planTimeoutSec))
-  let change = describeChange(catalogue.current, snapshot, BootstrapChange)
+): Result[CatalogueLoad, TklError] =
+  ## `stored` is the metadata of the host's persisted lists and registry.
+  ## Supply bodies with `loadList`, stored ones first so that bundled lists
+  ## replaced by usable stored copies are never parsed; then `finishLoad`.
+  if planTimeoutSec <= 0 or refreshState.lastSuccess < 0 or
+      refreshState.lastAttempt < 0:
+    return err(tklError(InvalidArgument, "InvalidRefreshState"))
+  let sources = ?initLoadedSources(config, stored)
+  ok(CatalogueLoad(config: config, stored: stored, customs: customs,
+    limits: limits, state: refreshState, timeoutSec: planTimeoutSec,
+    sources: sources))
+
+func storedRegistryIndex(load: CatalogueLoad): int =
+  for index, content in load.stored:
+    if content.id == load.config.registryId:
+      return index
+  -1
+
+proc loadList*(
+    load: var CatalogueLoad, id: string, origin: BodyOrigin, body: openArray[char]
+): Result[void, TklError] =
+  ## Parses one borrowed body; nothing retains it after the call.
+  if id.len > 0 and id == load.config.registryId:
+    if origin == StoredBody and load.storedRegistryIndex < 0:
+      return err(tklError(InvalidArgument, "UnknownStoredList", id))
+    let slot = if origin == StoredBody: addr load.storedRegistry
+      else: addr load.bundledRegistry
+    if slot[].isSome:
+      return err(tklError(InvalidArgument, "DuplicateListBody", id))
+    if origin == BundledBody and load.storedRegistry.isSome and
+        load.storedRegistry.get.isOk:
+      slot[] = Opt.some(Result[Registry, TklError].ok(Registry()))
+      return ok()
+    let valid = validateDocument(body, RegistryFormat, id, load.limits)
+    slot[] = Opt.some(if valid.isErr: Result[Registry, TklError].err(valid.error)
+      else: parseRegistry(body, id, load.limits))
+    return ok()
+  load.sources.loadBody(load.config, load.stored, id, origin, body, load.limits)
+
+proc finishLoad*(load: sink CatalogueLoad): Result[Catalogue, TklError] =
+  ## Builds and publishes revision one from the supplied bodies.
+  var (parsed, contents) = ?load.sources.finishSources(load.config, load.stored)
+  var registry = Opt.none(RegistryContent)
+  let storedIndex = load.storedRegistryIndex
+  if storedIndex >= 0 and load.storedRegistry.isSome and load.storedRegistry.get.isOk:
+    registry = Opt.some(RegistryContent(meta: load.stored[storedIndex],
+      registry: load.storedRegistry.get.get))
+  elif load.bundledRegistry.isSome:
+    registry = Opt.some(RegistryContent(meta: ListContent(
+      id: load.config.registryId, source: load.config.registryUrl,
+      format: RegistryFormat), registry: ?load.bundledRegistry.get))
+  let snapshot = share(?buildFromParsed(parsed, load.config.chains,
+    load.config.policy, load.customs, 1))
+  var planner = ?initPlanner(load.config, move(contents), move(registry),
+    load.limits, load.state, load.timeoutSec)
+  var catalogue = Catalogue(config: move(load.config), parsed: move(parsed),
+    customs: move(load.customs), nextMutation: 1, limits: load.limits,
+    planner: move(planner))
+  let change = describeChange(Snapshot(), snapshot[], BootstrapChange)
   discard catalogue.publish(snapshot, change)
   ok(catalogue)
 
@@ -146,14 +214,16 @@ func nextRevision(catalogue: Catalogue): Result[uint64, TklError] =
   ok(catalogue.revision + 1)
 
 proc reconfigure(
-    catalogue: var Catalogue, config: CatalogueConfig, kind: ChangeKind
+    catalogue: var Catalogue, chains: seq[uint64], policy: CataloguePolicy,
+    kind: ChangeKind
 ): Result[Change, TklError] =
   if catalogue.configEpoch == high(uint64):
     return err(tklError(Internal, "EpochExhausted"))
-  let next = ?buildFromParsed(catalogue.parsed, config.chains, config.policy,
-    catalogue.customs, ?catalogue.nextRevision(), catalogue.diagnostics)
-  let change = describeChange(catalogue.current, next, kind)
-  catalogue.config = config
+  let next = share(?buildFromParsed(catalogue.parsed, chains, policy,
+    catalogue.customs, ?catalogue.nextRevision(), catalogue.diagnostics))
+  let change = describeChange(catalogue.current[], next[], kind)
+  catalogue.config.chains = chains
+  catalogue.config.policy = policy
   inc catalogue.configEpoch
   ok(catalogue.publish(next, change))
 
@@ -162,18 +232,14 @@ proc setChains*(
 ): Result[Change, TklError] =
   if chains == catalogue.config.chains:
     return ok(Change(revision: catalogue.revision, kind: NoChange))
-  var config = catalogue.config
-  config.chains = chains
-  catalogue.reconfigure(config, ChainsChange)
+  catalogue.reconfigure(chains, catalogue.config.policy, ChainsChange)
 
 proc setPolicy*(
     catalogue: var Catalogue, policy: CataloguePolicy
 ): Result[Change, TklError] =
   if policy == catalogue.config.policy:
     return ok(Change(revision: catalogue.revision, kind: NoChange))
-  var config = catalogue.config
-  config.policy = policy
-  catalogue.reconfigure(config, PolicyChange)
+  catalogue.reconfigure(catalogue.config.chains, policy, PolicyChange)
 
 proc prepare(
     catalogue: var Catalogue, mutation: CustomMutation
@@ -196,9 +262,9 @@ proc prepare(
     return err(tklError(NotFound, "CustomTokenNotFound"))
   if mutation.kind == UpsertCustom and not found:
     customs.add mutation.token
-  let next = ?buildFromParsed(catalogue.parsed, catalogue.config.chains,
-    catalogue.config.policy, customs, ?catalogue.nextRevision(), catalogue.diagnostics)
-  let change = describeChange(catalogue.current, next, CustomChange)
+  let next = share(?buildFromParsed(catalogue.parsed, catalogue.config.chains,
+    catalogue.config.policy, customs, ?catalogue.nextRevision(), catalogue.diagnostics))
+  let change = describeChange(catalogue.current[], next[], CustomChange)
   var proposal = mutation
   proposal.id = catalogue.nextMutation
   inc catalogue.nextMutation
@@ -229,12 +295,12 @@ proc customCommit*(
 ): Result[Change, TklError] =
   if mutationId == 0 or mutationId != catalogue.pending.mutation.id:
     return err(tklError(InvalidArgument, "UnknownCustomMutation"))
-  let pending = move(catalogue.pending)
+  var pending = move(catalogue.pending)
   catalogue.pending = PendingCustom()
   if pending.epoch != catalogue.configEpoch or pending.revision != catalogue.revision:
     return err(tklError(SupersededPlan, "CustomMutationSuperseded"))
-  catalogue.customs = pending.customs
-  ok(catalogue.publish(pending.snapshot, pending.change))
+  catalogue.customs = move(pending.customs)
+  ok(catalogue.publish(move(pending.snapshot), pending.change))
 
 proc customAbort*(
     catalogue: var Catalogue, mutationId: uint64
@@ -248,7 +314,7 @@ func refreshState*(catalogue: Catalogue): RefreshState = catalogue.planner.state
 
 proc clearRefresh(catalogue: var Catalogue) =
   catalogue.refreshId = 0
-  catalogue.refreshSnapshot = Snapshot()
+  catalogue.refreshSnapshot = nil
   catalogue.refreshSources = SourceRefresh()
   catalogue.refreshChange = Change()
   catalogue.refreshDiagnostics = @[]
@@ -274,19 +340,24 @@ proc refreshPlan*(
   catalogue.clearRefresh()
   ok(plan)
 
+proc refreshPutBody*(
+    catalogue: var Catalogue, planId: uint64, requestId: string,
+    body: openArray[char]
+): Result[void, TklError] =
+  ## Validates and parses one fetched body of the current round in this call.
+  ## The host keeps its own bytes to persist; the catalogue keeps none.
+  catalogue.planner.putBody(planId, requestId, body, catalogue.revision,
+    catalogue.epoch)
+
 proc refreshApply*(
     catalogue: var Catalogue, planId: uint64, responses: seq[FetchResult], now: int64
 ): Result[RefreshReport, TklError] =
   let report = ?catalogue.planner.applyResults(planId, responses, now,
     catalogue.revision, catalogue.epoch)
   if report.step == RefreshStep.Ready:
-    # Writes are the only candidate contents that differ from the committed ones
-    # `catalogue.parsed` was built from.
-    var written: HashSet[string]
-    for content in report.writes:
-      written.incl content.id
-    var sources = reparseCatalogueSources(catalogue.parsed, catalogue.config,
-      catalogue.planner.preparedContents, written, catalogue.limits)
+    var updates = catalogue.planner.takeUpdates()
+    var sources = refreshSources(catalogue.parsed, catalogue.config,
+      catalogue.planner.preparedContents, updates)
     if sources.isErr:
       discard catalogue.planner.abortPlan(planId, Aborted)
       return err(sources.error)
@@ -296,14 +367,16 @@ proc refreshApply*(
       # rebuild the current snapshot, so commit publishes nothing.
       catalogue.refreshChange = Change(revision: revision, kind: RefreshChange)
     else:
-      let next = sources.get.buildFromRefresh(catalogue.parsed,
+      var next = sources.get.buildFromRefresh(catalogue.parsed,
         catalogue.config.chains, catalogue.config.policy, catalogue.customs,
         revision, report.diagnostics)
       if next.isErr:
         discard catalogue.planner.abortPlan(planId, Aborted)
         return err(next.error)
-      catalogue.refreshChange = describeChange(catalogue.current, next.get, RefreshChange)
-      catalogue.refreshSnapshot = next.get
+      let shared = share(move(next.get))
+      catalogue.refreshChange = describeChange(catalogue.current[], shared[],
+        RefreshChange)
+      catalogue.refreshSnapshot = shared
     catalogue.refreshId = planId
     catalogue.refreshSources = move(sources.get)
     catalogue.refreshDiagnostics = report.diagnostics

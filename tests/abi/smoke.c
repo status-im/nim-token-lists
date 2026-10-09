@@ -38,11 +38,13 @@ int main(void) {
  for(int i=0;i<2;i++) assert(pthread_create(&first[i],NULL,initialize,NULL)==0);
  for(int i=0;i<2;i++) assert(pthread_join(first[i],NULL)==0);
  TklBuf out={0}; uint64_t h=99;
- assert(tkl_abi_version()==2);
- assert(tkl_create(1,cfg,strlen(cfg),&h,&out)==TKL_ABI_MISMATCH && h==0);
- assert(tkl_create(2,cfg,strlen(cfg),&h,&out)==TKL_OK);
+ assert(tkl_abi_version()==3);
+ assert(tkl_create(2,cfg,strlen(cfg),&h,&out)==TKL_ABI_MISMATCH && h==0);
+ assert(tkl_create(3,cfg,strlen(cfg),&h,&out)==TKL_OK);
  assert(tkl_get_all(h,"{}",2,&out)==TKL_INVALID_ARGUMENT); tkl_buf_free(&out);
- assert(tkl_load_stored(h,"{}",2,&out)==TKL_OK);tkl_buf_free(&out);
+ uint64_t txn=0;
+ assert(tkl_load_begin(h,"{}",2,&txn,&out)==TKL_OK && txn!=0);tkl_buf_free(&out);
+ assert(tkl_load_finish(h,txn,&out)==TKL_OK);tkl_buf_free(&out);
  assert(tkl_revision(h)==1);
  assert(tkl_get_lists(h,"{}",2,&out)==TKL_OK);
  assert(out.len>0 && out.data[0]=='{');tkl_buf_free(&out);tkl_buf_free(&out);

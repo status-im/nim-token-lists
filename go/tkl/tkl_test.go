@@ -2,6 +2,7 @@ package tkl
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -12,20 +13,20 @@ func mustCreate(t testing.TB) *Handle {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Destroy() })
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	return h
 }
 func TestVersionAndErrors(t *testing.T) {
-	if ABIVersion() != 2 {
+	if ABIVersion() != 3 {
 		t.Fatal(ABIVersion())
 	}
-	if version, err := LibraryVersion(); err != nil || version != "0.2.0" {
+	if version, err := LibraryVersion(); err != nil || version != "0.3.0" {
 		t.Fatal(version, err)
 	}
 	h := mustCreate(t)
-	if _, err := h.LoadStored(Bootstrap{}); !errors.Is(err, Busy) {
+	if _, err := h.LoadStored(Bootstrap{}, nil); !errors.Is(err, Busy) {
 		t.Fatal(err)
 	}
 	if _, err := h.GetByKey("broken"); !errors.Is(err, InvalidArgument) {
@@ -124,7 +125,7 @@ func TestRefreshPersistenceAndSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.SetAutoRefresh(true, 30, 3); err != nil {
@@ -139,11 +140,11 @@ func TestRefreshPersistenceAndSchedule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: registryBody, ETag: "r1"}}, now+1)
+		more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: []byte(registryBody), ETag: "r1"}}, now+1)
 		if err != nil || more.Step != "NeedMore" {
 			t.Fatal(more, err)
 		}
-		ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 200, Body: listBody, ETag: "m1"}}, now+2)
+		ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 200, Body: []byte(listBody), ETag: "m1"}}, now+2)
 		if err != nil || ready.Step != "Ready" || len(ready.Writes) != 2 {
 			t.Fatal(ready, err)
 		}
@@ -179,7 +180,7 @@ func TestLimitsAndInputIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Destroy()
-	if _, err = h.LoadStored(Bootstrap{}); err != nil {
+	if _, err = h.LoadStored(Bootstrap{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = h.GetByKey(string(make([]byte, 200))); !errors.Is(err, InvalidArgument) {
@@ -188,4 +189,102 @@ func TestLimitsAndInputIsolation(t *testing.T) {
 	if _, err = CreateWithLimits(Config{}, &Limits{}); !errors.Is(err, InvalidArgument) {
 		t.Fatal(err)
 	}
+}
+
+// Bodies are borrowed only for the call that receives them: overwriting a
+// buffer after the call returns must not change any result.
+func TestBorrowedBodiesCanBeReused(t *testing.T) {
+	h, err := Create(Config{Chains: []uint64{1}, MainListID: "main", RegistryID: "registry",
+		RegistryURL: "https://example.org/registry", InitialLists: []ListContent{{ID: "main"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	scratch := []byte(strings.Replace(listBody, "ONE", "BND", 2))
+	txn, err := h.LoadBegin(Bootstrap{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.LoadList(txn, "main", Bundled, scratch); err != nil {
+		t.Fatal(err)
+	}
+	overwrite(scratch)
+	if _, err = h.LoadFinish(txn); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.LoadList(txn, "main", Bundled, scratch); !errors.Is(err, InvalidArgument) {
+		t.Fatal("finished load accepted a body", err)
+	}
+	expectSymbol(t, h, "BND")
+	plan, err := h.RefreshPlan(10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch = []byte(registryBody)
+	if err = h.RefreshPutBody(plan.ID, "registry", scratch); err != nil {
+		t.Fatal(err)
+	}
+	overwrite(scratch)
+	more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, ETag: "r"}}, 13)
+	if err != nil || more.Step != "NeedMore" {
+		t.Fatal(more, err)
+	}
+	scratch = []byte(strings.Replace(listBody, "ONE", "NEW", 2))
+	results := []FetchResult{{ID: "main", Status: 200, Body: scratch, ETag: "m"}}
+	report, err := h.RefreshApply(plan.ID, results, 14)
+	overwrite(scratch)
+	if err != nil || report.Step != "Ready" || len(report.Writes) != 2 || report.Writes[1].ETag != "m" {
+		t.Fatal(report, err)
+	}
+	if _, err = h.RefreshCommit(plan.ID, 15); err != nil {
+		t.Fatal(err)
+	}
+	expectSymbol(t, h, "NEW")
+}
+
+func overwrite(data []byte) {
+	for i := range data {
+		data[i] = 'x'
+	}
+}
+
+func expectSymbol(t *testing.T, h *Handle, symbol string) {
+	t.Helper()
+	page, err := h.GetList("main")
+	if err != nil || page.Items[0].Tokens[0].Symbol != symbol {
+		t.Fatal(page, err)
+	}
+}
+
+func TestLoadTransactions(t *testing.T) {
+	h, err := Create(Config{Chains: []uint64{1}, MainListID: "main", InitialLists: []ListContent{{ID: "main"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	stored := Bootstrap{Stored: []ListContent{{ID: "main", Source: "https://example.org/main"}}}
+	if _, err = h.LoadStored(stored, []ListBody{{ID: "main", Origin: Stored, Data: []byte("broken")}}); !errors.Is(err, InvalidContent) {
+		t.Fatal("initial list without a usable body loaded", err)
+	}
+	if h.Revision() != 0 {
+		t.Fatal("failed load published")
+	}
+	txn, err := h.LoadBegin(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.LoadAbort(txn); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.LoadAbort(txn); !errors.Is(err, InvalidArgument) {
+		t.Fatal(err)
+	}
+	changes, err := h.LoadStored(stored, []ListBody{
+		{ID: "main", Origin: Bundled, Data: []byte(strings.Replace(listBody, "ONE", "BND", 2))},
+		{ID: "main", Origin: Stored, Data: []byte(listBody)},
+	})
+	if err != nil || len(changes.Items) != 1 || changes.Items[0].Kind != "BootstrapChange" {
+		t.Fatal(changes, err)
+	}
+	expectSymbol(t, h, "ONE")
 }
