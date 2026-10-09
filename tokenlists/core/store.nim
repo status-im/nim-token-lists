@@ -4,8 +4,8 @@
 ## interned byte arena. Build tables are dropped by `freeze`; a frozen store is
 ## immutable and may be shared between snapshots and reader threads.
 
-import ./types
-export types
+import ./[types, jsonout]
+export types, jsonout
 
 type
   TextId* = distinct uint32
@@ -383,6 +383,33 @@ func token*(store: TokenStore, index: uint32): Token =
     crossChainId: store.text(record.crossChainId), decimals: record.decimals,
     name: store.text(record.name), symbol: store.text(record.symbol),
     logoUri: store.logo(record), custom: CustomToken in record.flags)
+
+proc writeText(sink: var JsonSink, store: TokenStore, id: TextId) {.inline.} =
+  let (first, last) = store.span(id)
+  sink.addEscaped(store.bytes.toOpenArray(first, last - 1))
+
+proc writeToken*(sink: var JsonSink, store: TokenStore, index: uint32) =
+  ## The JSON of `token(index)`, written from the record and the arena.
+  let record = store.records[index]
+  sink.add "{\"chainId\":"
+  sink.addUint(store.chainIds[record.chain])
+  sink.add ",\"address\":\"0x"
+  for value in record.address:
+    sink.add HexPairs[value]
+  sink.add "\",\"crossChainId\":\""
+  sink.writeText(store, record.crossChainId)
+  sink.add "\",\"decimals\":"
+  sink.addUint(record.decimals)
+  sink.add ",\"name\":\""
+  sink.writeText(store, record.name)
+  sink.add "\",\"symbol\":\""
+  sink.writeText(store, record.symbol)
+  sink.add "\",\"logoUri\":\""
+  if record.logoPrefix > 0:
+    sink.writeText(store, store.prefixes[record.logoPrefix - 1])
+  sink.writeText(store, record.logo)
+  sink.add(if CustomToken in record.flags: "\",\"custom\":true}"
+    else: "\",\"custom\":false}")
 
 func cmp*(a, b: Identity): int =
   if a.chainId != b.chainId:

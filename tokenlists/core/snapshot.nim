@@ -227,6 +227,212 @@ proc finish*(
   snapshot.indexTokens()
   ok(snapshot)
 
+type
+  OutputKind = enum
+    TokenOutput, ListOutput, DiagnosticOutput
+
+  QueryOutput* = object
+    ## A query answer, written as JSON straight from the records. It borrows
+    ## the snapshot, which must outlive it.
+    snapshot: ptr Snapshot
+    kind: OutputKind
+    selected: seq[TokenRef]
+    windowed: bool
+      ## Items are `first .. last` of the snapshot's tokens, lists or
+      ## diagnostics rather than `selected`.
+    first, last: int
+    total: int
+
+func output(snapshot: Snapshot, kind: OutputKind, total: int): QueryOutput =
+  QueryOutput(snapshot: unsafeAddr snapshot, kind: kind, total: total, last: -1)
+
+func window(count, offset, limit: int): Result[(int, int), TklError] =
+  if offset < 0 or limit < 0:
+    return err(tklError(InvalidArgument, "NegativePagination"))
+  if offset >= count:
+    return ok((0, -1))
+  let length = if limit == 0: count - offset else: min(limit, count - offset)
+  ok((offset, offset + length - 1))
+
+func byKeyOutput*(snapshot: Snapshot, key: openArray[char]): Result[QueryOutput, TklError] =
+  var output = snapshot.output(TokenOutput, 1)
+  output.selected = @[?snapshot.find(?parseIdentity(key))]
+  ok(output)
+
+func byChainAddressOutput*(
+    snapshot: Snapshot, chainId: uint64, address: openArray[char]
+): Result[QueryOutput, TklError] =
+  var output = snapshot.output(TokenOutput, 1)
+  output.selected = @[?snapshot.find(?identityOf(chainId, address))]
+  ok(output)
+
+func nativeOutput*(snapshot: Snapshot, chainId: uint64): Result[QueryOutput, TklError] =
+  snapshot.byChainAddressOutput(chainId, NativeAddress)
+
+func allOutput*(snapshot: Snapshot, offset = 0, limit = 0): Result[QueryOutput, TklError] =
+  var output = snapshot.output(TokenOutput, snapshot.tokens.len)
+  (output.first, output.last) = ?window(snapshot.tokens.len, offset, limit)
+  output.windowed = true
+  ok(output)
+
+func byChainsOutput*(
+    snapshot: Snapshot, chains: openArray[uint64], offset = 0, limit = 0
+): Result[QueryOutput, TklError] =
+  var references: seq[TokenRef]
+  for reference in snapshot.tokens:
+    if snapshot.identityOf(reference).chainId in chains:
+      references.add reference
+  let (first, last) = ?window(references.len, offset, limit)
+  var output = snapshot.output(TokenOutput, references.len)
+  if last >= first:
+    output.selected = references[first .. last]
+  ok(output)
+
+func byKeysOutput*(
+    snapshot: Snapshot, keys: openArray[string]
+): Result[QueryOutput, TklError] =
+  var output = snapshot.output(TokenOutput, 0)
+  output.selected = newSeqOfCap[TokenRef](keys.len)
+  for key in keys:
+    let found = snapshot.find(?parseIdentity(key))
+    if found.isOk:
+      output.selected.add found.get
+  output.total = output.selected.len
+  ok(output)
+
+func byChainAddressesOutput*(
+    snapshot: Snapshot, chainIds: openArray[uint64], addresses: openArray[string]
+): Result[QueryOutput, TklError] =
+  ## Batch `byChainAddressOutput` over parallel arrays: the tokens found, in
+  ## request order.
+  if chainIds.len != addresses.len:
+    return err(tklError(InvalidArgument, "MismatchedPairs"))
+  var output = snapshot.output(TokenOutput, 0)
+  output.selected = newSeqOfCap[TokenRef](chainIds.len)
+  for index, chainId in chainIds:
+    let found = snapshot.find(?identityOf(chainId, addresses[index]))
+    if found.isOk:
+      output.selected.add found.get
+  output.total = output.selected.len
+  ok(output)
+
+func listOutput*(snapshot: Snapshot, id: string): Result[QueryOutput, TklError] =
+  for index, list in snapshot.lists:
+    if list.meta.id == id:
+      var output = snapshot.output(ListOutput, 1)
+      (output.first, output.last, output.windowed) = (index, index, true)
+      return ok(output)
+  err(tklError(NotFound, "ListNotFound", id))
+
+func listsOutput*(snapshot: Snapshot): QueryOutput =
+  result = snapshot.output(ListOutput, snapshot.lists.len)
+  (result.first, result.last, result.windowed) = (0, snapshot.lists.high, true)
+
+func diagnosticsOutput*(snapshot: Snapshot): QueryOutput =
+  result = snapshot.output(DiagnosticOutput, snapshot.diagnostics.len)
+  (result.first, result.last, result.windowed) =
+    (0, snapshot.diagnostics.high, true)
+
+template references(output: QueryOutput): openArray[TokenRef] =
+  if output.windowed:
+    output.snapshot.tokens.toOpenArray(output.first, output.last)
+  else:
+    output.selected.toOpenArray(0, output.selected.high)
+
+proc writeReference(sink: var JsonSink, snapshot: Snapshot, reference: TokenRef) =
+  sink.writeToken(snapshot.storeOf(reference)[], reference.indexOf)
+
+proc writeList(sink: var JsonSink, snapshot: Snapshot, list: ListView) =
+  ## A list as the C API returns it: missing tags become `{}`.
+  let meta = unsafeAddr list.meta
+  sink.add "{\"id\":"
+  sink.addString(meta.id)
+  sink.add ",\"name\":"
+  sink.addString(meta.name)
+  sink.add ",\"timestamp\":"
+  sink.addString(meta.timestamp)
+  sink.add ",\"fetchedTimestamp\":"
+  sink.addString(meta.fetchedTimestamp)
+  sink.add ",\"source\":"
+  sink.addString(meta.source)
+  sink.add ",\"version\":{\"major\":"
+  sink.addInt(meta.version.major)
+  sink.add ",\"minor\":"
+  sink.addInt(meta.version.minor)
+  sink.add ",\"patch\":"
+  sink.addInt(meta.version.patch)
+  sink.add "},\"tags\":"
+  sink.add(if string(meta.tags).len == 0: "{}" else: string(meta.tags))
+  sink.add ",\"logoUri\":"
+  sink.addString(meta.logoUri)
+  sink.add ",\"keywords\":["
+  for index, keyword in meta.keywords:
+    if index > 0:
+      sink.add ','
+    sink.addString(keyword)
+  sink.add "],\"tokens\":["
+  for index, reference in list.tokens:
+    if index > 0:
+      sink.add ','
+    sink.writeReference(snapshot, reference)
+  sink.add "]}"
+
+proc writeError(sink: var JsonSink, error: TklError) =
+  sink.add "{\"code\":"
+  sink.addString($error.code)
+  sink.add ",\"detail\":"
+  sink.addString(error.detail)
+  sink.add ",\"sourceId\":"
+  sink.addString(error.sourceId)
+  sink.add '}'
+
+proc emit(output: QueryOutput, sink: var JsonSink) =
+  let snapshot = output.snapshot
+  sink.add "{\"revision\":"
+  sink.addUint(snapshot.revisionValue)
+  sink.add ",\"total\":"
+  sink.addInt(output.total)
+  sink.add ",\"items\":["
+  case output.kind
+  of TokenOutput:
+    for index, reference in output.references:
+      if index > 0:
+        sink.add ','
+      sink.writeReference(snapshot[], reference)
+  of ListOutput:
+    for index in output.first .. output.last:
+      if index > output.first:
+        sink.add ','
+      sink.writeList(snapshot[], snapshot.lists[index])
+  of DiagnosticOutput:
+    for index in output.first .. output.last:
+      if index > output.first:
+        sink.add ','
+      sink.writeError(snapshot.diagnostics[index])
+  sink.add "]}"
+
+proc jsonLen*(output: QueryOutput): int =
+  var sink = measuring()
+  output.emit(sink)
+  sink.len
+
+proc writeJson*(output: QueryOutput, data: ptr UncheckedArray[char]) =
+  ## Writes exactly `jsonLen` bytes to `data`.
+  var sink = writing(data)
+  output.emit(sink)
+
+proc json*(output: QueryOutput): string =
+  result = newString(output.jsonLen)
+  if result.len > 0:
+    output.writeJson(cast[ptr UncheckedArray[char]](addr result[0]))
+
+func tokenPage(output: QueryOutput): Page[Token] =
+  ## Materializes a token output for Nim callers.
+  result = Page[Token](revision: output.snapshot.revisionValue,
+    total: output.total, items: newSeqOfCap[Token](output.references.len))
+  for reference in output.references:
+    result.items.add output.snapshot[].materialize(reference)
+
 func getByKey*(snapshot: Snapshot, key: string): Result[Token, TklError] =
   let reference = ?snapshot.find(?parseIdentity(key))
   ok(snapshot.materialize(reference))
@@ -240,72 +446,39 @@ func getByChainAddress*(
 func getNative*(snapshot: Snapshot, chainId: uint64): Result[Token, TklError] =
   snapshot.getByChainAddress(chainId, NativeAddress)
 
-func materialize(
-    snapshot: Snapshot, references: openArray[TokenRef], total: int
-): Page[Token] =
-  result = Page[Token](revision: snapshot.revisionValue, total: total,
-    items: newSeqOfCap[Token](references.len))
-  for reference in references:
-    result.items.add snapshot.materialize(reference)
-
-func window(count, offset, limit: int): Result[(int, int), TklError] =
-  if offset < 0 or limit < 0:
-    return err(tklError(InvalidArgument, "NegativePagination"))
-  if offset >= count:
-    return ok((0, -1))
-  let length = if limit == 0: count - offset else: min(limit, count - offset)
-  ok((offset, offset + length - 1))
-
 func getAll*(
     snapshot: Snapshot, offset = 0, limit = 0
 ): Result[Page[Token], TklError] =
-  let (first, last) = ?window(snapshot.tokens.len, offset, limit)
-  ok(snapshot.materialize(snapshot.tokens.toOpenArray(first, last),
-    snapshot.tokens.len))
+  ok((?snapshot.allOutput(offset, limit)).tokenPage)
 
 func getByChains*(
     snapshot: Snapshot, chains: openArray[uint64], offset = 0, limit = 0
 ): Result[Page[Token], TklError] =
-  var references: seq[TokenRef]
-  for reference in snapshot.tokens:
-    if snapshot.identityOf(reference).chainId in chains:
-      references.add reference
-  let (first, last) = ?window(references.len, offset, limit)
-  ok(snapshot.materialize(references.toOpenArray(first, last), references.len))
+  ok((?snapshot.byChainsOutput(chains, offset, limit)).tokenPage)
 
 func getByKeys*(
     snapshot: Snapshot, keys: openArray[string]
 ): Result[Page[Token], TklError] =
-  var references = newSeqOfCap[TokenRef](keys.len)
-  for key in keys:
-    let found = snapshot.find(?parseIdentity(key))
-    if found.isOk:
-      references.add found.get
-  ok(snapshot.materialize(references, references.len))
+  ok((?snapshot.byKeysOutput(keys)).tokenPage)
 
 func getByChainAddresses*(
     snapshot: Snapshot, pairs: openArray[TokenIdentity]
 ): Result[Page[Token], TklError] =
   ## Batch `getByChainAddress`: the tokens found, in request order.
-  var references = newSeqOfCap[TokenRef](pairs.len)
+  var output = snapshot.output(TokenOutput, 0)
+  output.selected = newSeqOfCap[TokenRef](pairs.len)
   for pair in pairs:
     let found = snapshot.find(?identityOf(pair.chainId, pair.address))
     if found.isOk:
-      references.add found.get
-  ok(snapshot.materialize(references, references.len))
+      output.selected.add found.get
+  output.total = output.selected.len
+  ok(output.tokenPage)
 
 func getByChainAddresses*(
     snapshot: Snapshot, chainIds: openArray[uint64], addresses: openArray[string]
 ): Result[Page[Token], TklError] =
   ## The same batch as parallel arrays, which the C ABI decodes cheaply.
-  if chainIds.len != addresses.len:
-    return err(tklError(InvalidArgument, "MismatchedPairs"))
-  var references = newSeqOfCap[TokenRef](chainIds.len)
-  for index, chainId in chainIds:
-    let found = snapshot.find(?identityOf(chainId, addresses[index]))
-    if found.isOk:
-      references.add found.get
-  ok(snapshot.materialize(references, references.len))
+  ok((?snapshot.byChainAddressesOutput(chainIds, addresses)).tokenPage)
 
 func materialize(snapshot: Snapshot, list: ListView): TokenList =
   result = list.meta
