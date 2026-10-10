@@ -2,6 +2,7 @@ package tkl
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -287,4 +288,48 @@ func TestLoadTransactions(t *testing.T) {
 		t.Fatal(changes, err)
 	}
 	expectSymbol(t, h, "ONE")
+}
+
+// Ids with control characters come from fetched registries and must still
+// produce valid JSON in every non-query output.
+func TestControlCharactersInIdsStayValidJSON(t *testing.T) {
+	h, err := Create(Config{Chains: []uint64{1}, MainListID: "main", RegistryID: "registry",
+		RegistryURL: "https://example.org/registry", InitialLists: []ListContent{{ID: "main"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Destroy()
+	if _, err = h.LoadStored(Bootstrap{}, []ListBody{{ID: "main", Origin: Bundled, Data: []byte(listBody)}}); err != nil {
+		t.Fatal(err)
+	}
+	const odd = "x\u000f\u001f"
+	registry := strings.Replace(registryBody, `"schema":"standard"}]`,
+		`"schema":"standard"},{"id":"x\u000f\u001f","sourceUrl":"https://example.org/x","schema":"standard"}]`, 1)
+	plan, err := h.RefreshPlan(10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unexpected *Error
+	if err = h.RefreshPutBody(plan.ID, odd, []byte(listBody)); !errors.As(err, &unexpected) || unexpected.SourceID != odd {
+		t.Fatalf("error body: %#v", err)
+	}
+	more, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "registry", Status: 200, Body: []byte(registry), ETag: "r1"}}, 11)
+	if err != nil || len(more.Requests) != 2 || more.Requests[1].ID != odd {
+		t.Fatal(more, err)
+	}
+	ready, err := h.RefreshApply(plan.ID, []FetchResult{{ID: "main", Status: 304},
+		{ID: odd, Status: 200, Body: []byte("{}")}}, 12)
+	if err != nil || ready.Step != "Ready" || !strings.Contains(fmt.Sprint(ready.Sources), odd) {
+		t.Fatal(ready, err)
+	}
+	if _, err = h.RefreshCommit(plan.ID, 13); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := h.ChangesSince(0)
+	if err != nil {
+		t.Fatal(changes, err)
+	}
+	if state, err := h.RefreshState(); err != nil || state.LastSuccess != 13 {
+		t.Fatal(state, err)
+	}
 }
