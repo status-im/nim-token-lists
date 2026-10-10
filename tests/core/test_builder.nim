@@ -132,3 +132,24 @@ suite "catalogue builder and immutable queries":
     check buildCatalogue(CatalogueConfig(mainListId: "missing")).isErr
     check buildCatalogue(CatalogueConfig(policy:
       CataloguePolicy(skippedKeys: @["bad"])) ).isErr
+
+  test "chain and address batches keep request order and skip unknown pairs":
+    var config = CatalogueConfig(chains: @[1'u64, 10], initialLists: list,
+      policy: CataloguePolicy(nativeAliases: @[TokenIdentity(chainId: 10, address: b)],
+        skippedKeys: @["1-" & c]))
+    let snapshot = buildCatalogue(config, [bundled("list", body("A") & "")]).get
+    let page = snapshot.getByChainAddresses([
+      TokenIdentity(chainId: 1, address: a.toUpperAscii.replace("0X", "0x")),
+      TokenIdentity(chainId: 10, address: b),
+      TokenIdentity(chainId: 1, address: c),
+      TokenIdentity(chainId: 99, address: a),
+      TokenIdentity(chainId: 1, address: a)]).get
+    check page.items.mapIt(it.symbol) == @["A", "ETH", "A"]
+    check page.total == 3
+    check page.items[1].chainId == 10
+    check snapshot.getByChainAddresses([TokenIdentity(chainId: 1,
+      address: "0x12")]).error.code == InvalidArgument
+    check snapshot.getByChainAddresses([]).get.items.len == 0
+    check snapshot.getByChainAddresses([10'u64, 1], [b, a]).get.items ==
+      page.items[1 .. 2]
+    check snapshot.getByChainAddresses([1'u64], []).error.code == InvalidArgument

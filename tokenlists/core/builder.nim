@@ -19,18 +19,24 @@ type
     bodyLen: int
 
   CachedSource = object
-    source: ParsedSource
+    list: TokenList
+      ## Metadata of the parsed list; its tokens are `rows`.
+    rows: seq[uint32]
+      ## Records of the catalogue store, in document order.
     failures: seq[TklError]
     usable: bool
     origin: SourceOrigin
 
   ParsedCatalogue* = object
+    ## Every parsed list, sharing one frozen store. Chain, policy and custom
+    ## changes build new index views over it; only refreshes replace it.
+    store: StoreRef
     sources: seq[CachedSource]
 
   SourceRefresh* = object
-    ## Parsed catalogue whose unchanged entries still live in the previous one.
+    ## The parsed catalogue a refresh would publish. Building it leaves the
+    ## previous one untouched; it is empty when nothing changed.
     parsed: ParsedCatalogue
-    reused: seq[int]
     unchanged: bool
 
   SourceBody* = object
@@ -48,10 +54,14 @@ type
     bundled, stored: ParsedBody
 
   LoadedSources* = object
-    ## Lists parsed during a load, by id and origin. Bodies are not kept.
+    ## Lists parsed during a load, by id and origin, into one store. Bodies
+    ## are not kept.
     order: seq[string]
     initial, cached, slots: Table[string, int]
     lists: seq[LoadedList]
+    store: TokenStore
+    unreferenced: bool
+      ## A discarded or failed parse left rows in `store`.
 
 func origin(content: ListContent, format: ListFormat, bodyLen: int): SourceOrigin =
   SourceOrigin(id: content.id, format: format, source: content.source,
@@ -59,12 +69,12 @@ func origin(content: ListContent, format: ListFormat, bodyLen: int): SourceOrigi
     fetchedAt: content.fetchedAt, bodyLen: bodyLen)
 
 proc parseContent(
-    content: ListContent, body: openArray[char], format: ListFormat,
-    limits: ParseLimits
+    store: var TokenStore, content: ListContent, body: openArray[char],
+    format: ListFormat, limits: ParseLimits
 ): Result[ParsedSource, TklError] =
   if content.failure.code != Ok:
     return err(tklError(content.failure.code, content.failure.detail, content.id))
-  var value = ?parseListBody(body, format, content.id, limits)
+  var value = ?parseListBody(store, body, format, content.id, limits)
   value.list.source = content.source
   value.list.fetchedTimestamp = content.fetchedTimestamp
   ok(value)
@@ -110,6 +120,7 @@ proc initLoadedSources*(
 ): Result[LoadedSources, TklError] =
   var sources: LoadedSources
   sources.order = ?sourceOrder(config, stored, sources.initial, sources.cached)
+  sources.store = initTokenStore()
   sources.lists.setLen(sources.order.len)
   for slot, id in sources.order:
     sources.slots[id] = slot
@@ -137,27 +148,47 @@ proc loadBody*(
     let format = if id in sources.initial:
         config.initialLists[sources.initial.getOrDefault(id)].format
       else: content.format
-    target.parsed = parseContent(content, body, format, limits)
-    if target.parsed.isOk:
+    target.parsed = sources.store.parseContent(content, body, format, limits)
+    if target.parsed.isOk and list.bundled.parsed.isOk:
       # A usable stored copy wins; drop a bundled one parsed before it.
       list.bundled.parsed = Result[ParsedSource, TklError].err(tklError(Ok, "", id))
+      sources.unreferenced = true
+    sources.unreferenced = sources.unreferenced or target.parsed.isErr
   elif not (list.stored.received and list.stored.parsed.isOk):
     let content = config.initialLists[sources.initial.getOrDefault(id)]
-    target.parsed = parseContent(content, body, content.format, limits)
+    target.parsed = sources.store.parseContent(content, body, content.format, limits)
+    sources.unreferenced = sources.unreferenced or target.parsed.isErr
   ok()
+
+proc absorb(
+    store: var TokenStore, source: TokenStore, rows: openArray[uint32]
+): seq[uint32] =
+  result = newSeqOfCap[uint32](rows.len)
+  for row in rows:
+    result.add store.copyRecord(source, row)
+
+proc shared(store: sink TokenStore): StoreRef =
+  var value = store
+  value.freeze()
+  result = StoreRef()
+  result[] = move(value)
 
 proc finishSources*(
     sources: var LoadedSources, config: CatalogueConfig,
     stored: openArray[ListContent]
 ): Result[(ParsedCatalogue, seq[ListContent]), TklError] =
-  ## Picks each stored list if it parsed, else its bundled list. Also returns
-  ## the committed metadata of every usable list, for refresh planning.
+  ## Picks each stored list if it parsed, else its bundled list, and merges
+  ## them into one store. Also returns the committed metadata of every usable
+  ## list, for refresh planning.
   var parsed: ParsedCatalogue
+  # Rows left by discarded parses are dropped by copying the used ones.
+  var compacted = initTokenStore()
   var contents = config.initialLists
   var usableStored: HashSet[string]
   for slot, id in sources.order:
     var entry = CachedSource(origin: SourceOrigin(id: id))
     let list = addr sources.lists[slot]
+    var chosen: ptr ParsedSource
     if id in sources.cached:
       let content = stored[sources.cached.getOrDefault(id)]
       if content.failure.code != Ok:
@@ -174,21 +205,29 @@ proc finishSources*(
         else:
           usableStored.incl id
         entry.origin = origin(meta, meta.format, list.stored.bodyLen)
-        entry.source = move(list.stored.parsed.value)
-        entry.usable = true
-    if not entry.usable and id in sources.initial:
+        chosen = addr list.stored.parsed.value
+    if chosen.isNil and id in sources.initial:
       let content = config.initialLists[sources.initial.getOrDefault(id)]
       if not list.bundled.received:
         return err(tklError(InvalidContent, "MissingListBody", id))
       if list.bundled.parsed.isErr:
         return err(list.bundled.parsed.error)
       entry.origin = origin(content, content.format, list.bundled.bodyLen)
-      entry.source = move(list.bundled.parsed.value)
-      entry.usable = true
-    if not entry.usable and id == config.mainListId:
+      chosen = addr list.bundled.parsed.value
+    if chosen.isNil and id == config.mainListId:
       return err(entry.failures[^1])
+    if not chosen.isNil:
+      entry.list = move(chosen.list)
+      entry.rows = if sources.unreferenced:
+          compacted.absorb(sources.store, chosen.rows)
+        else: move(chosen.rows)
+      entry.usable = true
+      list[] = LoadedList()
     parsed.sources.add entry
   sources.lists.setLen(0)
+  parsed.store = shared(if sources.unreferenced: move(compacted)
+    else: move(sources.store))
+  sources.store = TokenStore()
   for content in stored:
     if content.id in usableStored:
       contents.add content
@@ -199,8 +238,8 @@ proc refreshSources*(
     contents: openArray[ListContent], updates: var seq[ParsedContent]
 ): Result[SourceRefresh, TklError] =
   ## Lists in `updates` replace their entries; every other list in `contents`
-  ## reuses its parsed entry from `previous`, which stays there until
-  ## `adoptSources`, so no parsed list is copied and no body is needed.
+  ## keeps its parsed entry from `previous`, so no body is needed. The result
+  ## is a new store; `previous` stays published until `adoptSources`.
   var initial, cached: Table[string, int]
   let order = ?sourceOrder(config, contents, initial, cached)
   var previousIndex, updateIndex: Table[string, int]
@@ -208,23 +247,31 @@ proc refreshSources*(
     previousIndex[entry.origin.id] = index
   for index, update in updates:
     updateIndex[update.meta.id] = index
-  var output = SourceRefresh(unchanged: order.len == previous.sources.len)
+  var unchanged = updates.len == 0 and order.len == previous.sources.len
+  for slot, id in order:
+    if id notin updateIndex and id notin previousIndex:
+      return err(tklError(Internal, "MissingParsedList", id))
+    unchanged = unchanged and previous.sources[slot].origin.id == id
+  if unchanged:
+    return ok(SourceRefresh(unchanged: true))
+  var output: SourceRefresh
+  var store = initTokenStore()
   for id in order:
     var entry: CachedSource
-    var reused = -1
     if id in updateIndex:
       let update = addr updates[updateIndex.getOrDefault(id)]
       entry.origin = origin(update.meta, update.meta.format, update.bodyLen)
-      entry.source = move(update.source)
+      entry.list = move(update.source.list)
+      entry.rows = store.absorb(update.source.store, update.source.rows)
       entry.usable = true
-    elif id in previousIndex:
-      reused = previousIndex.getOrDefault(id)
+      update.source = ParsedSource()
     else:
-      return err(tklError(Internal, "MissingParsedList", id))
-    if reused != output.reused.len:
-      output.unchanged = false
-    output.reused.add reused
+      let reused = addr previous.sources[previousIndex.getOrDefault(id)]
+      entry = CachedSource(list: reused.list, failures: reused.failures,
+        usable: reused.usable, origin: reused.origin)
+      entry.rows = store.absorb(previous.store[], reused.rows)
     output.parsed.sources.add entry
+  output.parsed.store = shared(store)
   ok(output)
 
 func unchanged*(refresh: SourceRefresh): bool =
@@ -232,10 +279,8 @@ func unchanged*(refresh: SourceRefresh): bool =
   refresh.unchanged
 
 proc adoptSources*(previous: var ParsedCatalogue, refresh: sink SourceRefresh) =
-  for slot, index in refresh.reused:
-    if index >= 0:
-      refresh.parsed.sources[slot] = move(previous.sources[index])
-  previous = move(refresh.parsed)
+  if not refresh.unchanged:
+    previous = move(refresh.parsed)
 
 func validateCustomKeys(customs: seq[Token]): Result[void, TklError] =
   var seen: HashSet[string]
@@ -252,6 +297,7 @@ proc buildFromParsed*(
     policy = CataloguePolicy(), customs: seq[Token] = @[], revision = 1'u64,
     extraDiagnostics: seq[TklError] = @[]
 ): Result[Snapshot, TklError] =
+  ## Builds index views over the parsed store; nothing parsed is copied.
   ?validateCustomKeys(customs)
   var seen: HashSet[uint64]
   for chain in chains:
@@ -265,17 +311,17 @@ proc buildFromParsed*(
         normalizeAddress(descriptor.address).get != NativeAddress:
       return err(tklError(InvalidArgument, "InvalidNativeDescriptor"))
     descriptors[descriptor.chainId] = descriptor
-  var nativeList = TokenList(id: "native", name: "Native tokens")
+  var builder = initViewBuilder(parsed.store, chains, revision)
+  builder.addList(TokenList(id: "native", name: "Native tokens"))
   for chain in chains:
     var token = descriptors.getOrDefault(chain, Token(chainId: chain,
       address: NativeAddress, symbol: "ETH", name: "Ethereum",
       crossChainId: "eth-native", decimals: 18, logoUri: DefaultNativeLogo))
     token.address = NativeAddress
     token.custom = false
-    nativeList.tokens.add token
-  var lists = @[nativeList]
+    builder.addExtra(token)
   var diagnostics = extraDiagnostics
-  var customList = TokenList(id: "custom", name: "Custom tokens")
+  var visibleCustoms: seq[Token]
   for token in customs:
     let valid = validateCustom(token, chains)
     if valid.isErr:
@@ -284,34 +330,30 @@ proc buildFromParsed*(
     var normalized = token
     normalized.address = normalizeAddress(token.address).get
     normalized.custom = true
-    customList.tokens.add normalized
+    visibleCustoms.add normalized
+  template addCustoms() =
+    builder.addList(TokenList(id: "custom", name: "Custom tokens"))
+    for token in visibleCustoms:
+      builder.addExtra(token)
   if policy.priority == CustomFirstPriority:
-    lists.add customList
+    addCustoms()
   for entry in parsed.sources:
     diagnostics.add entry.failures
     if entry.usable:
-      let filtered = filterSource(entry.source, chains)
-      lists.add filtered.list
-      for diagnostic in filtered.diagnostics:
-        diagnostics.add diagnostic.error
+      builder.addList(entry.list)
+      builder.addRows(entry.rows, diagnostics)
   if policy.priority == StatusPriority:
-    lists.add customList
-  initSnapshot(lists, policy, diagnostics, revision)
+    addCustoms()
+  builder.finish(policy, diagnostics)
 
 proc buildFromRefresh*(
-    refresh: var SourceRefresh, previous: var ParsedCatalogue, chains: seq[uint64],
+    refresh: SourceRefresh, previous: ParsedCatalogue, chains: seq[uint64],
     policy: CataloguePolicy, customs: seq[Token], revision: uint64,
     extraDiagnostics: seq[TklError]
 ): Result[Snapshot, TklError] =
-  ## Borrows reused entries from `previous` for the build and returns them.
-  for slot, index in refresh.reused:
-    if index >= 0:
-      swap(refresh.parsed.sources[slot], previous.sources[index])
-  result = buildFromParsed(refresh.parsed, chains, policy, customs, revision,
-    extraDiagnostics)
-  for slot, index in refresh.reused:
-    if index >= 0:
-      swap(refresh.parsed.sources[slot], previous.sources[index])
+  let parsed = if refresh.unchanged: unsafeAddr previous
+    else: unsafeAddr refresh.parsed
+  buildFromParsed(parsed[], chains, policy, customs, revision, extraDiagnostics)
 
 proc loadSources*(
     config: CatalogueConfig, bodies: openArray[SourceBody],

@@ -101,7 +101,7 @@ suite "publication":
     check first.churn == 0
     let owned = measure:
       discard catalogue.snapshot
-    check owned.churn > 100_000
+    check owned.churn > 0
     discard catalogue.setChains(@[1'u64]).get
     let previous = catalogue.published
     discard catalogue.setChains(@[1'u64, 10]).get
@@ -113,3 +113,91 @@ suite "publication":
       check snapshot[].getAll().get == catalogue.getAll().get
     check previous[].revision + 1 == catalogue.revision
     shared.deinit()
+
+const
+  Mib = 1 shl 20
+  Ids = ["coingecko_arbitrum", "coingecko_base", "coingecko_bsc",
+    "coingecko_ethereum", "coingecko_linea", "coingecko_optimism", "status",
+    "uniswap"]
+  Chains = @[1'u64, 10, 42161, 8453, 56, 59144]
+
+proc embedded(): (CatalogueConfig, seq[string]) =
+  var config = CatalogueConfig(chains: Chains, mainListId: "status",
+    policy: CataloguePolicy(nativeTokens: @[Token(chainId: 56,
+      address: NativeAddress, symbol: "BNB", name: "BNB", decimals: 18)]))
+  var bodies: seq[string]
+  for id in Ids:
+    config.initialLists.add ListContent(id: id, source: "local",
+      format: if id == "status": StatusFormat else: StandardFormat)
+    bodies.add fixture(id & ".json")
+  (config, bodies)
+
+proc loadAll(config: CatalogueConfig, bodies: seq[string]): Catalogue =
+  var load = beginLoad(config).get
+  for index, id in Ids:
+    load.loadList(id, BundledBody, bodies[index]).get
+  finishLoad(move(load)).get
+
+suite "compact catalogue":
+  test "a loaded catalogue retains a compact store":
+    let (config, bodies) = embedded()
+    var catalogue: Catalogue
+    let usage = measure:
+      catalogue = loadAll(config, bodies)
+    check catalogue.getAll().get.total > 11_000
+    checkpoint "retained " & $usage.retained & " peak " & $usage.peak
+    check usage.retained < 2 * Mib + Mib div 2
+    check usage.peak < 8 * Mib
+
+  test "chain and policy changes rebuild only indices":
+    let (config, bodies) = embedded()
+    var catalogue = loadAll(config, bodies)
+    let narrowed = measure:
+      discard catalogue.setChains(@[1'u64, 10]).get
+    let restored = measure:
+      discard catalogue.setChains(Chains).get
+    var policy = config.policy
+    policy.priority = CustomFirstPriority
+    let reordered = measure:
+      discard catalogue.setPolicy(policy).get
+    for usage in [narrowed, restored, reordered]:
+      checkpoint "churn " & $usage.churn & " peak " & $usage.peak
+      check usage.churn < 2 * Mib
+      check usage.peak < Mib
+    check restored.retained < Mib div 2
+
+  test "lookups and batches allocate only their results":
+    let (config, bodies) = embedded()
+    let catalogue = loadAll(config, bodies)
+    let key = "1-0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    check catalogue.getByKey(key).isOk
+    let single = measure:
+      for _ in 0 ..< 100:
+        discard catalogue.getByKey(key).get
+    check single.churn div 100 < 512
+    let pairs = @[TokenIdentity(chainId: 1, address: NativeAddress),
+      TokenIdentity(chainId: 1, address: "0xC02aaa39b223FE8D0A0e5C4F27eAD9083C756Cc2")]
+    let batch = measure:
+      check catalogue.getByChainAddresses(pairs).get.items.len == 2
+    check batch.churn < 2048
+
+  test "rows of discarded parses are not retained":
+    let config = CatalogueConfig(chains: Chains,
+      initialLists: @[ListContent(id: "uniswap", source: "bundled")])
+    let stored = @[ListContent(id: "uniswap", source: "https://example.org/u")]
+    let bundled = fixture("uniswap.json")
+    let replacement = fixture("coingecko_linea.json")
+    var first, second: Catalogue
+    let storedFirst = measure:
+      var load = beginLoad(config, stored).get
+      load.loadList("uniswap", StoredBody, replacement).get
+      load.loadList("uniswap", BundledBody, bundled).get
+      first = finishLoad(move(load)).get
+    let bundledFirst = measure:
+      var reordered = beginLoad(config, stored).get
+      reordered.loadList("uniswap", BundledBody, bundled).get
+      reordered.loadList("uniswap", StoredBody, replacement).get
+      second = finishLoad(move(reordered)).get
+    check first.getAll().get == second.getAll().get
+    checkpoint $storedFirst.retained & " " & $bundledFirst.retained
+    check abs(bundledFirst.retained - storedFirst.retained) < 16 * 1024

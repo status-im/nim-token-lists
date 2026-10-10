@@ -268,6 +268,22 @@ func (h *Handle) GetByKeys(keys []string) (Page[Token], error) {
 	}{keys})
 }
 
+// GetByChainAddresses looks up many tokens in one call; unknown pairs are
+// omitted and the rest keep request order.
+func (h *Handle) GetByChainAddresses(pairs []Identity) (Page[Token], error) {
+	chainIDs := make([]uint64, len(pairs))
+	addresses := make([]string, len(pairs))
+	for i, pair := range pairs {
+		chainIDs[i], addresses[i] = pair.ChainID, pair.Address
+	}
+	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
+		return C.tkl_get_by_chain_addresses(handle, data, length, out)
+	}, struct {
+		ChainIDs  []uint64 `json:"chainIds,omitempty"`
+		Addresses []string `json:"addresses,omitempty"`
+	}{chainIDs, addresses})
+}
+
 func (h *Handle) GetByChains(chains []uint64, offset, limit int) (Page[Token], error) {
 	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
 		return C.tkl_get_by_chains(handle, data, length, out)
