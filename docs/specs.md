@@ -14,7 +14,7 @@ use C bindings to call the Nim implementation.
 - Deterministic catalogue building, immutable query snapshots and revisioned publication.
 - Custom-token prepare, commit and abort operations.
 - Refresh planning, conditional fetch results and transactional publication.
-- Host-driven scheduling and parser/refresh-state fuzz targets.
+- Host-driven scheduling and parser, parser-differential and refresh-state fuzz targets.
 - A production C ABI, typed cgo wrapper and public Nim API.
 
 The core operates on supplied data without network or filesystem access.
@@ -100,8 +100,8 @@ token order and alias behavior. Custom preparation computes the change before
 the persistence handshake, so commit does not repeat the diff.
 
 Catalogue state belongs to its caller, which must synchronize mutations and
-snapshot acquisition. Once acquired, a value snapshot remains valid across
-later publications. The existing read/write lock gives queued writers priority
+snapshot acquisition. Once acquired, a published snapshot (a shared immutable
+reference) or a `detached` copy remains valid across later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
 Each publication builds one new immutable snapshot; none is changed afterwards.
@@ -115,12 +115,24 @@ reference. The write lock only swaps the published reference and revision; the
 replaced snapshot is released after the swap, once no reader can still borrow it.
 Core commit checks enforce revision/epoch validity.
 
+Query results are written as JSON straight from the token records and the
+string arena into the output buffer handed to the host: one allocation of the
+exact size, measured first, with no intermediate token values. The bytes are
+those of the json_serialization encoding of the materialized page.
+
 ## C and Go bindings
 
 ABI major 3 replaces version 2, whose create, load and refresh JSON carried list
 bodies. `tkl_create` accepts an ABI version and a JSON object containing `config`
 and optional `limits`; mismatched versions fail before creating a handle. Config
 list entries are metadata only (ID, format, source, fetch metadata).
+
+`limits` holds `maxBytes`, `maxDepth`, `maxArrayItems`, `maxObjectMembers`,
+`maxStringBytes` and `maxRows`, all positive. `maxRows` caps the token rows one
+list expands to (a Status token yields one row per contract); a list beyond it
+fails with `TooLarge`. The default, 100000, is 20 times the largest bundled
+list (4765 rows), and bounds a 16 MiB Status list that would otherwise expand
+to 1.6 million records.
 
 Loading is a transaction. `tkl_load_begin` accepts `stored` (persisted list and
 registry metadata, including failures), `customs` and `state` and returns a load
@@ -247,6 +259,13 @@ Parsing preserves list metadata and token order. Unsupported chains and invalid
 token rows produce diagnostics. Duplicate token rows are preserved for the
 caller to resolve. Status lists expand each token's contracts in numeric chain
 order and retain the cross-chain ID.
+
+Standard and Status lists are parsed in a single pass over the borrowed body.
+JSON well-formedness, limits, duplicate fields, field types and, for fetched
+documents, validation are checked while rows are written into the store, with
+no intermediate document tree or row strings. The results and error details
+are those of the typed decoder and validator this parser replaced, which
+`tests/oracle/` keeps for differential tests and fuzzing.
 
 Parsing cached or embedded data is separate from validating newly fetched
 documents. Validation checks required metadata, field types and registry

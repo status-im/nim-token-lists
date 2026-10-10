@@ -345,7 +345,7 @@ suite "refresh transactions":
     var catalogue = initCatalogue(config,
       [SourceBody(id: "main", origin: BundledBody, body: ListBody)],
       limits = ParseLimits(maxBytes: ListBody.len, maxDepth: 64,
-        maxArrayItems: 100, maxObjectMembers: 100, maxStringBytes: 1024)).get
+        maxArrayItems: 100, maxObjectMembers: 100, maxStringBytes: 1024, maxRows: 1 shl 30)).get
     let plan = catalogue.refreshPlan(10, force = true).get
     discard catalogue.refreshApply(plan.id, @[registryResult()], 11).get
     check catalogue.refreshPutBody(plan.id, "main", ListBody & "  ").isOk

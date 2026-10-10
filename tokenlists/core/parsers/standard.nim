@@ -1,21 +1,14 @@
 {.push raises: [], gcsafe.}
 
-import ./common
-export types, errors
+import ./stream
+export types, errors, common
 
 proc decodeStandardSource*(
     store: var TokenStore, data: openArray[char], sourceId: string,
     limits: ParseLimits
 ): Result[ParsedSource, TklError] =
   ## Adds the rows to `store`; the returned source holds their indices.
-  let wire = ?decodeDocument(data, WireList, limits, sourceId)
-  var source = ParsedSource(list: initParsed(wire, sourceId).list)
-  source.rows = newSeqOfCap[uint32](wire.tokens.len)
-  for raw in wire.tokens:
-    let row = ?decodeDocument(string(raw), StandardRow, limits, sourceId)
-    source.rows.add store.addToken(row.chainId, row.address, row.decimals,
-      row.name, row.symbol, row.logoURI, "")
-  ok(source)
+  parseList(store, data, StandardFormat, sourceId, limits)
 
 proc decodeStandardSource*(
     data: openArray[char], sourceId = "", limits = DefaultParseLimits

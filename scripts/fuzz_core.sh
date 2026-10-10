@@ -3,8 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 NIM="${NIM:-nim}"
 target="${1:-parsers}"
-if [[ "$target" != parsers && "$target" != planner ]]; then
-  echo "usage: $0 [parsers|planner] [libFuzzer arguments...]" >&2
+if [[ "$target" != parsers && "$target" != planner && "$target" != stream ]]; then
+  echo "usage: $0 [parsers|planner|stream] [libFuzzer arguments...]" >&2
   exit 2
 fi
 if [[ $# -gt 0 ]]; then shift; fi
@@ -17,7 +17,7 @@ for dep in nim-result nim-stew nim-faststreams nim-serialization nim-json-serial
   paths+=("--path:vendor/$dep")
 done
 mkdir -p "build/fuzz-$target/corpus"
-if [[ "$target" == parsers ]]; then
+if [[ "$target" == parsers || "$target" == stream ]]; then
   cp tests/fuzz/corpus/*.json "build/fuzz-$target/corpus/"
 else
   cp tests/fuzz/corpus/operations "build/fuzz-$target/corpus/"

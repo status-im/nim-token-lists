@@ -64,6 +64,8 @@ type
     maxArrayItems*: int
     maxObjectMembers*: int
     maxStringBytes*: int
+    maxRows*: int
+      ## Token rows one list may produce; a Status token yields one per contract.
 
   PriorityPolicy* = enum
     StatusPriority, CustomFirstPriority
@@ -111,4 +113,5 @@ const
     maxArrayItems: 100_000,
     maxObjectMembers: 4096,
     maxStringBytes: 1024 * 1024,
+    maxRows: 100_000,
   )
