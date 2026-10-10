@@ -33,6 +33,8 @@ test-c: lib
 	build/lengths
 	cc -std=c11 -Wall -Wextra -o build/transactions tests/abi/transactions.c -Iabi build/libtkl.a -lpthread -lm
 	build/transactions
+	cc -std=c11 -Wall -Wextra -o build/packed tests/abi/packed.c -Iabi build/libtkl.a -lpthread -lm
+	build/packed
 test-go: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -race -count=1 $(GO_LIB_STAMP) ./...
 test-differential: lib

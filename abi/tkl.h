@@ -72,6 +72,19 @@ int32_t tkl_get_by_keys(uint64_t handle, const char* json, size_t len, TklBuf* o
    the tokens found, in request order. */
 int32_t tkl_get_by_chain_addresses(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_by_chains(uint64_t handle, const char* json, size_t len, TklBuf* out);
+/* get_by_chains narrowed to what balance code needs, without JSON: the same
+   tokens in the same order (policy, skips, natives and customs applied) as
+   fixed little-endian records. `chainIds` holds `count` ids; count 0 (NULL
+   allowed) answers no tokens. On TKL_OK `out` is exactly
+     header  16 bytes: magic u32 = TKL_PACKED_MAGIC ("TKP1"), count u32,
+                       revision u64
+     count x 32 bytes: chainId u64, address u8[20], decimals u8, 3 zero bytes
+   Errors return JSON as other calls do. */
+#define TKL_PACKED_MAGIC 0x31504B54u
+#define TKL_PACKED_HEADER_BYTES 16u
+#define TKL_PACKED_RECORD_BYTES 32u
+int32_t tkl_get_by_chains_packed(uint64_t handle, const uint64_t* chainIds,
+                                 size_t count, TklBuf* out);
 int32_t tkl_get_all(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_native(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_list(uint64_t handle, const char* json, size_t len, TklBuf* out);

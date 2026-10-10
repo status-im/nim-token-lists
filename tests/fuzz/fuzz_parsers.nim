@@ -52,8 +52,20 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
     doAssert listed >= all.len
     if status.isOk:
       doAssert catalogue.get.getList("list").get.tokens == status.get.list.tokens
-    # Direct encoding against json_serialization.
+    # Packed by-chains records against the materialized page.
     let held = catalogue.get.published
+    for chains in [@[1'u64, 10], @[10'u64], @[]]:
+      let packed = held[].packedByChains(chains)
+      let tokens = held[].getByChains(chains).get.items
+      doAssert packed.len == PackedHeaderBytes + tokens.len * PackedRecordBytes
+      for index, token in tokens:
+        let at = PackedHeaderBytes + index * PackedRecordBytes
+        var address = "0x"
+        for offset in 0 ..< 20:
+          address.add toHex(packed[at + 8 + offset]).toLowerAscii
+        doAssert (uint64(packed[at]) or (uint64(packed[at + 1]) shl 8)) == token.chainId
+        doAssert address == token.address and packed[at + 28] == token.decimals
+    # Direct encoding against json_serialization.
     var lists = held[].getLists()
     for list in lists.items.mitems:
       if string(list.tags).len == 0:
