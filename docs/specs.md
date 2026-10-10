@@ -159,6 +159,8 @@ against status codes. Enum strings use their declared Nim names, for example
 | `get_by_key`, `get_by_chain_address`, `get_native` | `key`; `chainId,address`; `chainId` | Token page with one item |
 | `get_by_keys`, `get_by_chain_addresses` | `keys`; `chainIds,addresses` (equal lengths) | Token page in request order |
 | `get_by_chains`, `get_all` | `chains,offset,limit`; `offset,limit` | Token page |
+| `get_by_symbol_on_chain` | `chainId,symbol` | Token page of the chain's tokens whose symbol or name equals `symbol` ignoring ASCII case |
+| `get_by_cross_chain_ids_packed` | `crossChainIds` | Packed records (below) of the tokens sharing those ids |
 | `get_list`, `get_lists`, `get_diagnostics` | `id`; empty object; empty object | List or diagnostic page |
 | `set_chains`, `set_policy` | `chains`; `policy` | Change |
 | `custom_validate_upsert`, `custom_validate_delete` | `token`; `key` | Mutation |
@@ -186,7 +188,7 @@ Transfer event: they batch lookups with `get_by_keys`, `get_by_chain_addresses`
 or `get_by_chains` and keep only what one screen or event batch needs.
 `BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode.
 
-`tkl_get_by_chains_packed(handle, chainIds, count, out)` is the one query
+`tkl_get_by_chains_packed(handle, chainIds, count, out)` is a query
 without JSON, for balance fetching, which reads only chain, address and
 decimals of whole chains. It answers the tokens of `get_by_chains` with the same
 chains, in the same order, as fixed little-endian records written straight from
@@ -204,6 +206,25 @@ the instance `maxArrayItems`); errors return the usual JSON body. Go's
 `GetByChainsPacked` decodes into a reusable `[]ChainToken`: about 0.12 ms and one
 allocation for six mainnets (11774 tokens) on the same machine, against 25 ms for
 `GetByChains`.
+
+Two narrow queries serve paths that used to read the whole catalogue. Both scan
+the published views over interned ids, keep no index and allocate only their
+selection, so they add nothing to retained memory:
+
+- `tkl_get_by_cross_chain_ids_packed` takes `{"crossChainIds":[...]}` and
+  answers, in `get_all` order and the packed layout above, the tokens whose
+  cross-chain id is one of the non-empty ids (natives and customs included,
+  skipped keys excluded). Market data needs only the keys of tokens sharing an
+  asset. Each distinct cross-chain id text is hashed once per call. Go's
+  `GetByCrossChainIDsPacked` takes about 0.03 ms for five ids and 0.14 ms for
+  every id (714 tokens), against 26 ms for `GetAll` filtered in Go.
+- `tkl_get_by_symbol_on_chain` takes `{"chainId":N,"symbol":"..."}` and answers
+  a token page of that chain's tokens whose symbol or name equals `symbol`
+  ignoring ASCII case, in `get_by_chains` order. This is the rule clients use to
+  resolve legacy payment requests, which carry only a symbol: the first item
+  is their token. An empty symbol is `InvalidArgument`. Go's
+  `GetBySymbolOnChain` takes about 0.08 ms on chain 1, against 11 ms for
+  `GetByChains` filtered in Go.
 
 Handles use a bounded registry with generation counters. Destruction rejects new
 calls, waits for in-flight calls and frees state; stale generations are invalid.
