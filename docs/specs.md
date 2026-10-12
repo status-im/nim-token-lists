@@ -42,11 +42,20 @@ parsed only while no usable stored copy of it has been supplied, so hosts pass
 stored bodies first. Finishing picks each stored list if it parsed, else its
 bundled list, and publishes once; aborting publishes nothing.
 
-Custom edits and policy changes rebuild from cached rows; chain changes re-filter
-those rows without decoding JSON again, including rows on chains that were
+Parsed rows are stored compactly, once per catalogue: each row is a fixed-size
+record (chain, 20-byte address, decimals, flags and string IDs) and its strings
+live in one interned arena, with shared logo URL prefixes stored once.
+Identical rows of different lists share one record. Rows keep their document
+order, including rows on disabled chains and invalid rows, which are reported
+when a snapshot is built. Snapshots are index views over that store: raw lists,
+the unique catalogue and a sorted lookup index are arrays of record indices.
+Custom edits, policy and chain changes build new views over the same store
+without decoding JSON or copying rows, including rows on chains that were
 initially disabled. A refresh parses only the bodies it fetched; every other
 list keeps its parsed rows, including lists that fell back at load, whose
-diagnostics stay until they are fetched again.
+diagnostics stay until they are fetched again. A refresh that changes a list
+builds a new store from the kept and fetched rows; the published one is
+untouched until commit.
 
 Skipped keys affect the unique catalogue, not the retained raw lists.
 Native aliases resolve to a chain's zero-address token unless that alias key
@@ -56,12 +65,17 @@ descriptors for other currencies, such as BNB.
 Queries support keys, chain/address pairs, chains, native tokens and raw lists.
 Pages include the snapshot revision and total matching count; a zero limit
 returns all remaining results. Negative offsets or limits are rejected.
-Key queries preserve request order and repetitions while omitting missing
-tokens. Returned values can be modified without changing the source snapshot.
-Direct catalogue query methods borrow the current snapshot and copy only their
-results. The `snapshot` accessor deliberately copies the whole catalogue for
-callers that need to retain it; it should not be used for each hot lookup.
-`published` shares the immutable snapshot itself without copying it.
+Key and chain/address batch queries preserve request order and repetitions
+while omitting missing tokens; a malformed key or address fails the batch.
+Lookups binary-search the sorted index without allocating; `Token` and
+`TokenList` values are materialized only for results. Returned values can be
+modified without changing the source snapshot. Direct catalogue query methods
+borrow the current snapshot and copy only their results. The `snapshot`
+accessor deliberately copies the whole snapshot, store included, for callers
+that need to retain it: the copy shares no reference, so readers can take one
+under a shared lock. It should not be used for each hot lookup. `published`
+shares the immutable snapshot itself without copying it; snapshots built by
+chain, policy and custom changes share one store.
 
 ## Publication and custom tokens
 
@@ -91,6 +105,8 @@ later publications. The existing read/write lock gives queued writers priority
 over new readers. Host persistence and notifications remain outside the core.
 
 Each publication builds one new immutable snapshot; none is changed afterwards.
+Snapshot values cannot be copied implicitly, since a copy would share the store
+reference with readers on other threads; `detached` makes an independent copy.
 The C adapter publishes the core's snapshot itself, never a copy. Readers borrow
 it under the read lock through queries and result encoding without touching its
 reference count. A separate writer mutex serializes core mutation, construction,
@@ -129,7 +145,8 @@ against status codes. Enum strings use their declared Nim names, for example
 | Operations | Request fields | Result |
 | --- | --- | --- |
 | `get_by_key`, `get_by_chain_address`, `get_native` | `key`; `chainId,address`; `chainId` | Token page with one item |
-| `get_by_keys`, `get_by_chains`, `get_all` | `keys`; `chains,offset,limit`; `offset,limit` | Token page |
+| `get_by_keys`, `get_by_chain_addresses` | `keys`; `chainIds,addresses` (equal lengths) | Token page in request order |
+| `get_by_chains`, `get_all` | `chains,offset,limit`; `offset,limit` | Token page |
 | `get_list`, `get_lists`, `get_diagnostics` | `id`; empty object; empty object | List or diagnostic page |
 | `set_chains`, `set_policy` | `chains`; `policy` | Change |
 | `custom_validate_upsert`, `custom_validate_delete` | `token`; `key` | Mutation |
@@ -150,14 +167,12 @@ document limits when it is parsed. Requests with no fields use `{}`; zero-length
 JSON input remains invalid on the C boundary. No input pointer, JSON or body, is
 retained after the call returns.
 
-The status-go facade must serve hot per-row and per-event lookups from a
-revision-keyed Go mirror. It must not cross the ABI for each activity row or
-Transfer event. A changed revision triggers a bulk `get_all(0,0)` read and atomic
-mirror replacement; mutations and refresh coordination continue through C.
-Typed per-call lookup measured roughly 7–9 microseconds on Apple M2 hardware,
-including cgo and JSON costs, so the mirror is a requirement for the facade.
-`BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode needed
-for mirror refresh. The mirror itself belongs to the subsequent integration phase.
+The library is the single owner of the query index; hosts keep no mirror of it.
+A typed per-call lookup costs roughly 7 microseconds on Apple M2 hardware, mostly
+cgo and request JSON, so hosts must not cross the ABI for each activity row or
+Transfer event: they batch lookups with `get_by_keys`, `get_by_chain_addresses`
+or `get_by_chains` and keep only what one screen or event batch needs.
+`BenchmarkGetAllBulk` measures the full catalogue transfer and typed decode.
 
 Handles use a bounded registry with generation counters. Destruction rejects new
 calls, waits for in-flight calls and frees state; stale generations are invalid.

@@ -1,8 +1,8 @@
 {.push raises: [], gcsafe.}
 
 import std/[algorithm, sets]
-import ../[types, errors, keys, jsoncodec]
-export types, errors, jsoncodec
+import ../[types, errors, keys, jsoncodec, store]
+export types, errors, jsoncodec, store
 
 type
   WireTags = distinct JsonString
@@ -38,14 +38,15 @@ type
     logoURI*: string
     contracts*: Contracts
 
-  SourceRow* = object
-    token*: StandardRow
-    row*: int
-    crossChainId*: string
-
   ParsedSource* = object
+    ## A parsed list: its metadata, and its rows as records of its own store,
+    ## or of the caller's store when parsed into one. Row strings are interned
+    ## as they are decoded; none outlive the parse.
     list*: TokenList
-    rows*: seq[SourceRow]
+    store*: TokenStore
+    rows*: seq[uint32]
+    rowNumbers*: seq[uint32]
+      ## Document row of each entry when they differ (Status contracts).
 
 proc readValue*(
     reader: var JsonReader, value: var WireTags
@@ -78,30 +79,26 @@ func initParsed*(wire: WireList, sourceId: string): ParsedList =
     keywords: wire.keywords,
   ))
 
-proc appendRow*(
-    parsed: var ParsedList, row: StandardRow, index: int,
-    chains: openArray[uint64], crossChainId = ""
-) =
-  let address = normalizeAddress(row.address)
-  let failure =
-    if address.isErr: tklError(ValidationFailed, "BadAddress", parsed.list.id)
-    elif row.chainId notin chains:
-      tklError(UnsupportedChain, "UnsupportedChain", parsed.list.id)
-    elif row.decimals > 255:
-      tklError(ValidationFailed, "DecimalsTooLarge", parsed.list.id)
-    else: tklError(Ok, "", parsed.list.id)
-  if failure.code != Ok:
-    parsed.diagnostics.add RowDiagnostic(
-      error: failure, row: index, chainId: row.chainId)
-    return
-  parsed.list.tokens.add Token(
-    chainId: row.chainId, address: address.get, name: row.name,
-    symbol: row.symbol, decimals: uint8(row.decimals), logoUri: row.logoURI,
-    crossChainId: crossChainId,
-  )
+template ownStore*(decode: untyped): untyped =
+  ## Runs `decode` (which names `target`) into a store the source then owns.
+  var target {.inject.} = initTokenStore()
+  var source = ?decode
+  target.freeze()
+  source.store = move(target)
+  ok(source)
 
 proc filterSource*(source: ParsedSource, chains: openArray[uint64]): ParsedList =
+  ## Materializes the rows visible on `chains`, for callers of the parsers.
   var parsed = ParsedList(list: source.list)
-  for row in source.rows:
-    parsed.appendRow(row.token, row.row, chains, row.crossChainId)
+  for entry, index in source.rows:
+    let record = source.store.record(index)
+    let chainId = source.store.chainId(record)
+    let failure = rowFailure(record, chainId in chains, source.list.id)
+    if failure.code != Ok:
+      let row = if source.rowNumbers.len > 0: int(source.rowNumbers[entry])
+        else: entry
+      parsed.diagnostics.add RowDiagnostic(error: failure, row: row,
+        chainId: chainId)
+    else:
+      parsed.list.tokens.add source.store.token(index)
   parsed

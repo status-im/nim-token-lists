@@ -47,6 +47,18 @@ proc borrowingReader(shared: ptr Shared) {.thread.} =
           page.revision != shared.published.revision:
         discard shared.errors.fetchAdd(1)
 
+proc copyingReader(shared: ptr Shared) {.thread.} =
+  ## Takes its own copy under the read lock and queries it after release;
+  ## a plain `=` copy does not compile, it would share the store ref.
+  for index in 0 ..< 2000:
+    var held: Snapshot
+    shared.published.read(snapshot):
+      held = snapshot[].detached
+    let page = held.getAll().get
+    let expected = if page.revision mod 2 == 0: 10'u64 else: 1'u64
+    if page.items.len != 1 or page.items[0].chainId != expected:
+      discard shared.errors.fetchAdd(1)
+
 proc queryReader(shared: ptr Shared) {.thread.} =
   for index in 0 ..< 1000:
     shared.lock.acquireRead()
@@ -114,3 +126,20 @@ suite "snapshot publication under readers":
     check shared.errors.load() == 0
     check shared.published.revision == 201
     shared.published.deinit()
+
+  test "readers copy the shared snapshot while writers swap it":
+    for round in 0 ..< 5:
+      var shared: Shared
+      shared.catalogue = initCatalogue(CatalogueConfig(chains: @[1'u64])).get
+      shared.published.init()
+      shared.published.publish(shared.catalogue.published)
+      var writer: Thread[ptr Shared]
+      var readers: array[4, Thread[ptr Shared]]
+      for reader in readers.mitems:
+        createThread(reader, copyingReader, addr shared)
+      createThread(writer, swapPublisher, addr shared)
+      joinThread(writer)
+      for reader in readers.mitems:
+        joinThread(reader)
+      check shared.errors.load() == 0
+      shared.published.deinit()

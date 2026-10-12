@@ -68,6 +68,9 @@ int32_t tkl_set_policy(uint64_t handle, const char* json, size_t len, TklBuf* ou
 int32_t tkl_get_by_key(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_by_chain_address(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_by_keys(uint64_t handle, const char* json, size_t len, TklBuf* out);
+/* {"chainIds": [...], "addresses": [...]}, parallel arrays of equal length:
+   the tokens found, in request order. */
+int32_t tkl_get_by_chain_addresses(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_by_chains(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_all(uint64_t handle, const char* json, size_t len, TklBuf* out);
 int32_t tkl_get_native(uint64_t handle, const char* json, size_t len, TklBuf* out);
