@@ -106,12 +106,12 @@ proc decodeDocument*[T](
     var flags = {JsonReaderFlag.allowUnknownFields}
     if requireFields:
       flags.incl JsonReaderFlag.requireAllFields
-    var reader = JsonReader[DefaultFlavor].init(stream, flags, conf)
+    var reader = JsonReader[Json].init(stream, flags, conf)
     checkUniqueFields(reader)
     while stream.readable:
       if char(stream.read()) notin {' ', '\t', '\r', '\n'}:
         return err(tklError(InvalidArgument, "TrailingData", sourceId))
-    var typedReader = JsonReader[DefaultFlavor].init(
+    var typedReader = JsonReader[Json].init(
       unsafeMemoryInput(data.toOpenArrayByte(0, data.high)), flags, conf)
     # Keep ownership here so partially populated fields are destroyed if reading
     # raises. The value-returning overload can leak its partial result on error.
