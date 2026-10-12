@@ -65,6 +65,29 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
           address.add toHex(packed[at + 8 + offset]).toLowerAscii
         doAssert (uint64(packed[at]) or (uint64(packed[at + 1]) shl 8)) == token.chainId
         doAssert address == token.address and packed[at + 28] == token.decimals
+    # Narrow queries against the same filters over the full answers.
+    var crossIds = @["", input]
+    for token in all:
+      if token.crossChainId.len > 0 and crossIds.len < 8:
+        crossIds.add token.crossChainId
+    var sharing: seq[Token]
+    for token in all:
+      if token.crossChainId.len > 0 and token.crossChainId in crossIds:
+        sharing.add token
+    doAssert held[].getByCrossChainIds(crossIds).items == sharing
+    doAssert held[].packedByCrossChainIds(crossIds).len ==
+      PackedHeaderBytes + sharing.len * PackedRecordBytes
+    for probe in [input, if all.len > 0: all[0].symbol.toUpperAscii else: "x"]:
+      for chainId in [1'u64, 10]:
+        let found = held[].getBySymbolOnChain(chainId, probe)
+        if probe.len == 0:
+          doAssert found.isErr
+          continue
+        var expected: seq[Token]
+        for token in held[].getByChains([chainId]).get.items:
+          if cmpIgnoreCase(token.symbol, probe) == 0 or cmpIgnoreCase(token.name, probe) == 0:
+            expected.add token
+        doAssert found.get.items == expected
     # Direct encoding against json_serialization.
     var lists = held[].getLists()
     for list in lists.items.mitems:

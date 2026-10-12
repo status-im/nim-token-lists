@@ -288,6 +288,26 @@ suite "direct query encoding":
         data.len)
     check written.churn == 0
 
+  test "narrow queries allocate only their selection and a text mark per store":
+    let (config, bodies) = embedded()
+    let catalogue = loadAll(config, bodies)
+    let snapshot = catalogue.published
+    let ids = @["usd-coin", "tether", "ethereum", "status", "dai"]
+    var output: QueryOutput
+    let selected = measure:
+      output = snapshot[].byCrossChainIdsOutput(ids)
+    checkpoint "cross-chain churn " & $selected.churn
+    check output.packedLen > 16 + 32 * 10
+    check selected.churn < 128 * 1024
+    var data = newSeqUninit[byte](output.packedLen)
+    let written = measure:
+      output.writePacked(cast[ptr UncheckedArray[byte]](addr data[0]), data.len)
+    check written.churn == 0
+    let symbol = measure:
+      check snapshot[].bySymbolOnChainOutput(1, "usdc").get.packedLen > 16
+    checkpoint "symbol churn " & $symbol.churn
+    check symbol.churn < 1024
+
 suite "compact diagnostics":
   test "rows on a disabled chain cost no per-row diagnostic":
     let (config, bodies) = embedded()

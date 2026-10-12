@@ -108,12 +108,43 @@ func textLen(store: TokenStore, id: TextId): int =
   let (first, last) = store.span(id)
   last - first
 
-func textEquals(store: TokenStore, id: TextId, text: openArray[char]): bool =
+func textEquals*(store: TokenStore, id: TextId, text: openArray[char]): bool =
   let (first, last) = store.span(id)
   if last - first != text.len:
     return false
   for offset in 0 ..< text.len:
     if store.bytes[first + offset] != text[offset]:
+      return false
+  true
+
+func hashOf*(store: TokenStore, id: TextId, seed = hashSeed): uint64 =
+  ## `hashText` of the text `id`.
+  let (first, last) = store.span(id)
+  hashText(store.bytes.toOpenArray(first, last - 1), seed)
+
+func textCount*(store: TokenStore): int =
+  ## Ids are below this count.
+  store.ends.len
+
+func cmpText*(store: TokenStore, id: TextId, text: openArray[char]): int =
+  ## Byte order of the text `id` against `text`.
+  let (first, last) = store.span(id)
+  for offset in 0 ..< min(last - first, text.len):
+    let a = store.bytes[first + offset]
+    if a != text[offset]:
+      return (if a < text[offset]: -1 else: 1)
+  cmp(last - first, text.len)
+
+func equalsIgnoreAsciiCase*(store: TokenStore, id: TextId, text: openArray[char]): bool =
+  let (first, last) = store.span(id)
+  if last - first != text.len:
+    return false
+  for offset in 0 ..< text.len:
+    var a = store.bytes[first + offset]
+    var b = text[offset]
+    if a in {'A'..'Z'}: a = char(ord(a) + 32)
+    if b in {'A'..'Z'}: b = char(ord(b) + 32)
+    if a != b:
       return false
   true
 
