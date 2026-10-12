@@ -4,8 +4,9 @@
 ## interned byte arena. Build tables are dropped by `freeze`; a frozen store is
 ## immutable and may be shared between snapshots and reader threads.
 
-import ./types
-export types
+import std/typetraits
+import ./[types, jsonout, hashing]
+export types, jsonout
 
 type
   TextId* = distinct uint32
@@ -27,13 +28,15 @@ type
     reserved: uint8
     symbol*, name*, logo*, crossChainId*: TextId
 
-  TokenStore* = object
+  TokenStore* {.byref.} = object
     bytes: seq[char]
     ends: seq[uint32]
     prefixes: seq[TextId]
     chainIds: seq[uint64]
     records: seq[TokenRecord]
     textSlots, recordSlots, chainSlots: seq[uint32]
+    escaped: seq[uint64]
+      ## Bit per text that JSON output must escape.
     frozenValue: bool
 
   StoreRef* = ref TokenStore
@@ -49,7 +52,7 @@ const
   MaxPrefixes = 255
   MaxRecords* {.intdefine: "tklMaxRecords".} = 0x7FFF_FFFF
     ## Record indices stay below a snapshot's extra-store bit.
-  MaxTextBytes {.intdefine: "tklMaxTextBytes".} = int(high(uint32))
+  MaxTextBytes* {.intdefine: "tklMaxTextBytes".} = int(high(uint32))
     ## Arena offsets are 32-bit.
   PrefixSlashes = 5
   HexDigits = "0123456789abcdef"
@@ -86,21 +89,15 @@ func retainedBytes*(store: TokenStore): int =
   store.bytes.capacity + 4 * (store.ends.capacity + store.prefixes.capacity +
     store.textSlots.capacity + store.recordSlots.capacity +
     store.chainSlots.capacity) +
-    8 * store.chainIds.capacity + sizeof(TokenRecord) * store.records.capacity
+    8 * (store.chainIds.capacity + store.escaped.capacity) +
+    sizeof(TokenRecord) * store.records.capacity
 
-func mix(hash: uint64, value: uint64): uint64 {.inline.} =
-  (hash xor value) * 0x100000001B3'u64
+func hashText*(text: openArray[char], seed = hashSeed): uint64 {.inline.} =
+  hashBytes(text, seed)
 
-func hashText(text: openArray[char]): uint64 =
-  result = 0xCBF29CE484222325'u64
-  for ch in text:
-    result = mix(result, uint64(ord(ch)))
-
-func hashRecord(record: TokenRecord): uint64 =
-  result = 0xCBF29CE484222325'u64
-  let bytes = cast[ptr array[sizeof(TokenRecord), byte]](unsafeAddr record)
-  for value in bytes[]:
-    result = mix(result, uint64(value))
+func hashRecord*(record: TokenRecord, seed = hashSeed): uint64 =
+  let bytes = cast[ptr array[sizeof(TokenRecord), char]](unsafeAddr record)
+  hashBytes(bytes[], seed)
 
 func span(store: TokenStore, id: TextId): (int, int) {.inline.} =
   let index = int(uint32(id))
@@ -138,6 +135,7 @@ proc rehashTexts(store: var TokenStore) =
     let (first, last) = store.span(TextId(uint32(id)))
     var slot = hashText(store.bytes.toOpenArray(first, last - 1)) and mask
     while store.textSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.textSlots[slot] = uint32(id)
 
@@ -146,6 +144,7 @@ proc findText(store: TokenStore, text: openArray[char], slot: var uint64): int =
   let mask = uint64(store.textSlots.len - 1)
   slot = hashText(text) and mask
   while store.textSlots[slot] != 0:
+    countProbe()
     let id = TextId(store.textSlots[slot])
     if store.textEquals(id, text):
       return int(uint32(id))
@@ -169,6 +168,13 @@ proc intern*(store: var TokenStore, text: openArray[char]): TextId =
   store.bytes.setLen(start + text.len)
   copyMem(addr store.bytes[start], unsafeAddr text[0], text.len)
   store.ends.add uint32(store.bytes.len)
+  let id = store.ends.len - 1
+  if store.escaped.len <= id shr 6:
+    store.escaped.setLen((id shr 6) + 1)
+  for ch in text:
+    if ch < ' ' or ch == '"' or ch == '\\':
+      store.escaped[id shr 6] = store.escaped[id shr 6] or (1'u64 shl (id and 63))
+      break
   result = TextId(uint32(store.ends.len - 1))
   store.textSlots[slot] = uint32(result)
 
@@ -243,11 +249,8 @@ func sameLogo(a: TokenStore, ar: TokenRecord, b: TokenStore, br: TokenRecord): b
       return false
   true
 
-func hashChain(chainId: uint64): uint64 {.inline.} =
-  ## splitmix64: ids differing only in high bits still spread over slots.
-  result = (chainId xor (chainId shr 30)) * 0xBF58476D1CE4E5B9'u64
-  result = (result xor (result shr 27)) * 0x94D049BB133111EB'u64
-  result = result xor (result shr 31)
+func hashChain*(chainId: uint64, seed = hashSeed): uint64 {.inline.} =
+  hashValue(chainId, seed)
 
 proc rehashChains(store: var TokenStore) =
   store.chainSlots = newSeq[uint32](max(16, store.chainSlots.len * 2))
@@ -255,6 +258,7 @@ proc rehashChains(store: var TokenStore) =
   for index, chainId in store.chainIds:
     var slot = hashChain(chainId) and mask
     while store.chainSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.chainSlots[slot] = uint32(index + 1)
 
@@ -265,6 +269,7 @@ proc chainIndex(store: var TokenStore, chainId: uint64): uint32 =
   let mask = uint64(store.chainSlots.len - 1)
   var slot = hashChain(chainId) and mask
   while store.chainSlots[slot] != 0:
+    countProbe()
     let index = store.chainSlots[slot] - 1
     if store.chainIds[index] == chainId:
       return index
@@ -311,6 +316,7 @@ proc rehashRecords(store: var TokenStore) =
   for index, record in store.records:
     var slot = hashRecord(record) and mask
     while store.recordSlots[slot] != 0:
+      countProbe()
       slot = (slot + 1) and mask
     store.recordSlots[slot] = uint32(index + 1)
 
@@ -322,6 +328,7 @@ proc addRecord(store: var TokenStore, record: TokenRecord): uint32 =
   let mask = uint64(store.recordSlots.len - 1)
   var slot = hashRecord(record) and mask
   while store.recordSlots[slot] != 0:
+    countProbe()
     let index = store.recordSlots[slot] - 1
     if store.records[index] == record:
       return index
@@ -331,13 +338,18 @@ proc addRecord(store: var TokenStore, record: TokenRecord): uint32 =
   store.recordSlots[slot] = uint32(store.records.len)
   uint32(store.records.high)
 
+func fits(store: TokenStore, textBytes: int): bool =
+  store.records.len < MaxRecords and store.bytes.len + textBytes <= MaxTextBytes
+
 proc addToken*(
     store: var TokenStore, chainId: uint64, address: openArray[char],
     decimals: uint64, name, symbol, logoUri, crossChainId: openArray[char],
     custom = false
-): uint32 =
+): Opt[uint32] =
   ## Adds one row; an invalid address or decimals is kept as a flag so that
-  ## filtering can still report it in row order.
+  ## filtering can still report it in row order. None when the store is full.
+  if not store.fits(name.len + symbol.len + logoUri.len + crossChainId.len):
+    return Opt.none(uint32)
   var record = TokenRecord(chain: store.chainIndex(chainId))
   if not parseAddress(address, record.address):
     record.flags.incl BadAddress
@@ -351,7 +363,7 @@ proc addToken*(
   record.name = store.intern(name)
   (record.logoPrefix, record.logo) = store.internLogo(logoUri)
   record.crossChainId = store.intern(crossChainId)
-  store.addRecord(record)
+  Opt.some(store.addRecord(record))
 
 proc copyText(store: var TokenStore, source: TokenStore, id: TextId): TextId =
   let (first, last) = source.span(id)
@@ -369,18 +381,25 @@ proc copyLogo(
     return (0'u8, store.intern(source.logo(record)))
   (uint8(entry + 1), store.copyText(source, record.logo))
 
-proc copyRecord*(store: var TokenStore, source: TokenStore, index: uint32): uint32 =
-  ## Re-interns one record of another store into this one.
+proc copyRecord*(
+    store: var TokenStore, source: TokenStore, index: uint32
+): Opt[uint32] =
+  ## Re-interns one record of another store into this one; none when full.
   let original = source.records[index]
+  if not store.fits(source.textLen(original.symbol) +
+      source.textLen(original.name) + source.textLen(original.crossChainId) +
+      source.logoLen(original)):
+    return Opt.none(uint32)
   var record = original
   record.chain = store.chainIndex(source.chainIds[original.chain])
   record.symbol = store.copyText(source, original.symbol)
   record.name = store.copyText(source, original.name)
   record.crossChainId = store.copyText(source, original.crossChainId)
   (record.logoPrefix, record.logo) = store.copyLogo(source, original)
-  store.addRecord(record)
+  Opt.some(store.addRecord(record))
 
 proc trim[T](values: var seq[T]) =
+  static: doAssert supportsCopyMem(T)
   if values.capacity > values.len:
     var exact = newSeq[T](values.len)
     if values.len > 0:
@@ -397,6 +416,7 @@ proc freeze*(store: var TokenStore) =
   store.records.trim()
   store.chainIds.trim()
   store.prefixes.trim()
+  store.escaped.trim()
   store.frozenValue = true
 
 func sameToken*(a: TokenStore, ai: uint32, b: TokenStore, bi: uint32): bool =
@@ -409,17 +429,27 @@ func sameToken*(a: TokenStore, ai: uint32, b: TokenStore, bi: uint32): bool =
     a.sameText(ar.symbol, b, br.symbol) and a.sameText(ar.name, b, br.name) and
     a.sameText(ar.crossChainId, b, br.crossChainId) and a.sameLogo(ar, b, br)
 
+type RowFault* = enum
+  ## Why a parsed row cannot be published, in SDK check order.
+  NoFault, AddressFault, ChainFault, DecimalsFault
+
+func rowFault*(record: TokenRecord, chainEnabled: bool): RowFault =
+  if BadAddress in record.flags: AddressFault
+  elif not chainEnabled: ChainFault
+  elif BadDecimals in record.flags: DecimalsFault
+  else: NoFault
+
+func faultError*(fault: RowFault, sourceId: string): TklError =
+  case fault
+  of NoFault: tklError(Ok, "", sourceId)
+  of AddressFault: tklError(ValidationFailed, "BadAddress", sourceId)
+  of ChainFault: tklError(UnsupportedChain, "UnsupportedChain", sourceId)
+  of DecimalsFault: tklError(ValidationFailed, "DecimalsTooLarge", sourceId)
+
 func rowFailure*(
     record: TokenRecord, chainEnabled: bool, sourceId: string
 ): TklError =
-  ## Why a parsed row cannot be published, in SDK check order.
-  if BadAddress in record.flags:
-    tklError(ValidationFailed, "BadAddress", sourceId)
-  elif not chainEnabled:
-    tklError(UnsupportedChain, "UnsupportedChain", sourceId)
-  elif BadDecimals in record.flags:
-    tklError(ValidationFailed, "DecimalsTooLarge", sourceId)
-  else: tklError(Ok, "", sourceId)
+  faultError(rowFault(record, chainEnabled), sourceId)
 
 func token*(store: TokenStore, index: uint32): Token =
   ## Materializes one record for callers that need a `Token` value.
@@ -429,6 +459,41 @@ func token*(store: TokenStore, index: uint32): Token =
     crossChainId: store.text(record.crossChainId), decimals: record.decimals,
     name: store.text(record.name), symbol: store.text(record.symbol),
     logoUri: store.logo(record), custom: CustomToken in record.flags)
+
+proc writeText(sink: var JsonSink, store: TokenStore, id: TextId) {.inline.} =
+  let index = int(uint32(id))
+  let (first, last) = store.span(id)
+  if index shr 6 >= store.escaped.len or
+      (store.escaped[index shr 6] and (1'u64 shl (index and 63))) == 0:
+    sink.add store.bytes.toOpenArray(first, last - 1)
+  else:
+    sink.addEscaped(store.bytes.toOpenArray(first, last - 1))
+
+proc writeToken*(sink: var JsonSink, store: TokenStore, index: uint32) =
+  ## The JSON of `token(index)`, written from the record and the arena.
+  let record = store.records[index]
+  sink.add "{\"chainId\":"
+  sink.addUint(store.chainIds[record.chain])
+  sink.add ",\"address\":\"0x"
+  let hex = sink.reserve(40)
+  if not hex.isNil:
+    for index, value in record.address:
+      hex[2 * index] = HexPairs[value][0]
+      hex[2 * index + 1] = HexPairs[value][1]
+  sink.add "\",\"crossChainId\":\""
+  sink.writeText(store, record.crossChainId)
+  sink.add "\",\"decimals\":"
+  sink.addUint(record.decimals)
+  sink.add ",\"name\":\""
+  sink.writeText(store, record.name)
+  sink.add "\",\"symbol\":\""
+  sink.writeText(store, record.symbol)
+  sink.add "\",\"logoUri\":\""
+  if record.logoPrefix > 0:
+    sink.writeText(store, store.prefixes[record.logoPrefix - 1])
+  sink.writeText(store, record.logo)
+  sink.add(if CustomToken in record.flags: "\",\"custom\":true}"
+    else: "\",\"custom\":false}")
 
 func cmp*(a, b: Identity): int =
   if a.chainId != b.chainId:

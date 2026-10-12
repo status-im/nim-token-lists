@@ -1,6 +1,6 @@
 {.push raises: [], gcsafe.}
 
-import ./[common, standard, status]
+import ./stream
 export common
 
 type
@@ -23,14 +23,16 @@ proc parseListBody*(
     inc parsedContents
   if body.len == 0:
     return err(tklError(InvalidContent, "EmptyListContent", sourceId))
-  case format
-  of StandardFormat: decodeStandardSource(store, body, sourceId, limits)
-  of StatusFormat: decodeStatusSource(store, body, sourceId, limits)
-  of RegistryFormat:
-    err(tklError(UnsupportedSchema, "RegistryIsNotTokenList", sourceId))
+  if format == RegistryFormat:
+    return err(tklError(UnsupportedSchema, "RegistryIsNotTokenList", sourceId))
+  parseList(store, body, format, sourceId, limits)
 
-proc parseListBody*(
+proc fetchedListBody*(
     body: openArray[char], format: ListFormat, sourceId: string,
     limits: ParseLimits
 ): Result[ParsedSource, TklError] =
-  ownStore(parseListBody(target, body, format, sourceId, limits))
+  ## Validates and parses a fetched body in one pass into its own store.
+  doAssert format != RegistryFormat
+  when defined(tklCountParses):
+    inc parsedContents
+  ownStore(parseList(target, body, format, sourceId, limits, validate = true))

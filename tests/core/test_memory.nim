@@ -4,6 +4,7 @@ import std/[os, strutils, unittest]
 import ../memory/counting
 import ../../abi/published
 import ../../tokenlists/core/[catalogue, validators]
+import ../../tokenlists/core/parsers/[lists, stream]
 import ../../tokenlists/core/parsers/standard
 
 const Padding = 1 shl 20
@@ -101,7 +102,8 @@ suite "publication":
     check first.churn == 0
     let owned = measure:
       discard catalogue.snapshot
-    check owned.churn > 0
+    # An owned snapshot is detached: it copies the stores.
+    check owned.churn >= catalogue.published[].storeBytes
     discard catalogue.setChains(@[1'u64]).get
     let previous = catalogue.published
     discard catalogue.setChains(@[1'u64, 10]).get
@@ -201,3 +203,85 @@ suite "compact catalogue":
     check first.getAll().get == second.getAll().get
     checkpoint $storedFirst.retained & " " & $bundledFirst.retained
     check abs(bundledFirst.retained - storedFirst.retained) < 16 * 1024
+
+  test "a failed parse that adds no rows does not compact the store":
+    let stored = @[ListContent(id: "uniswap", source: "https://example.org/u")]
+    let bundled = fixture("uniswap.json")
+    let broken = '{'.repeat(2)
+    let plain = measure:
+      var load = beginLoad(config, @[]).get
+      load.loadList("uniswap", BundledBody, bundled).get
+      discard finishLoad(move(load)).get
+    var fallback: Catalogue
+    let failed = measure:
+      var retry = beginLoad(config, stored).get
+      retry.loadList("uniswap", StoredBody, broken).get
+      retry.loadList("uniswap", BundledBody, bundled).get
+      fallback = finishLoad(move(retry)).get
+    check fallback.getAll().get.total > 2
+    checkpoint $plain.churn & " " & $failed.churn
+    # Compacting would copy the whole store again (~470 KiB here).
+    check failed.churn - plain.churn < 128 * 1024
+
+suite "single-pass parsing":
+  test "a list parse allocates about its own store":
+    for id in Ids:
+      let body = fixture(id & ".json")
+      let format = if id == "status": StatusFormat else: StandardFormat
+      var parsed: ParsedSource
+      let usage = measure:
+        var store = initTokenStore()
+        parsed = parseList(store, body, format, id, DefaultParseLimits).get
+        store.freeze()
+        parsed.store = move(store)
+      checkpoint id & " body " & $body.len & " churn " & $usage.churn &
+        " peak " & $usage.peak & " retained " & $usage.retained
+      # Stores grow by doubling and are trimmed once: about 3x the body.
+      check usage.churn < 4 * body.len
+      check usage.peak < 2 * body.len
+
+  test "a refresh validates and parses a fetched body in one pass":
+    let body = fixture("uniswap.json")
+    let format = StandardFormat
+    let usage = measure:
+      discard fetchedListBody(body, format, "uniswap", DefaultParseLimits).get
+    checkpoint "body " & $body.len & " churn " & $usage.churn
+    check usage.churn < 4 * body.len
+
+  test "a full load allocates a few times its bodies":
+    let (config, bodies) = embedded()
+    var total = 0
+    for body in bodies:
+      total += body.len
+    let usage = measure:
+      discard loadAll(config, bodies)
+    checkpoint "bodies " & $total & " churn " & $usage.churn
+    check usage.churn < 4 * total
+
+suite "direct query encoding":
+  test "query JSON is one exactly sized allocation":
+    let (config, bodies) = embedded()
+    let catalogue = loadAll(config, bodies)
+    let snapshot = catalogue.published
+    var text: string
+    let all = measure:
+      text = snapshot[].allOutput().get.json
+    checkpoint "output " & $text.len & " churn " & $all.churn
+    check text.len > 2 * Mib
+    check all.churn < text.len + 64 * 1024
+    let lists = measure:
+      text = snapshot[].listsOutput.json
+    check lists.churn < text.len + 64 * 1024
+
+suite "compact diagnostics":
+  test "rows on a disabled chain cost no per-row diagnostic":
+    let (config, bodies) = embedded()
+    var catalogue = loadAll(config, bodies)
+    let before = catalogue.getDiagnostics().total
+    let narrowed = measure:
+      discard catalogue.setChains(@[1'u64, 10, 42161, 8453, 59144]).get
+    let diagnostics = catalogue.getDiagnostics()
+    check diagnostics.total > before + 3000
+    check diagnostics.items[^1].sourceId.len > 0
+    checkpoint "retained " & $narrowed.retained
+    check narrowed.retained < 64 * 1024

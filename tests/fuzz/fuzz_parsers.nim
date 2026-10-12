@@ -1,6 +1,7 @@
 {.push raises: [], gcsafe.}
 
-import tokenlists/core/[keys, validators]
+import std/strutils
+import tokenlists/core/[keys, validators, jsoncodec, snapshot]
 import tokenlists/core/parsers/[standard, status, registry]
 import tokenlists/api
 
@@ -19,7 +20,7 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
   if size > 0:
     copyMem(addr input[0], data, int(size))
   let limits = ParseLimits(maxBytes: 65536, maxDepth: 32,
-    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192)
+    maxArrayItems: 512, maxObjectMembers: 256, maxStringBytes: 8192, maxRows: 1 shl 30)
   discard parseKey(input)
   discard normalizeAddress(input)
   discard parseRegistry(input, limits = limits)
@@ -51,4 +52,14 @@ proc fuzz(data: ptr UncheckedArray[byte], size: csize_t): cint
     doAssert listed >= all.len
     if status.isOk:
       doAssert catalogue.get.getList("list").get.tokens == status.get.list.tokens
+    # Direct encoding against json_serialization.
+    let held = catalogue.get.published
+    var lists = held[].getLists()
+    for list in lists.items.mitems:
+      if string(list.tags).len == 0:
+        list.tags = JsonString("{}")
+    let actual = held[].listsOutput.json
+    doAssert actual == Json.encode(lists)
+    doAssert held[].allOutput().get.json == Json.encode(held[].getAll().get)
+    doAssert held[].diagnosticsOutput.json == Json.encode(held[].getDiagnostics())
   0
