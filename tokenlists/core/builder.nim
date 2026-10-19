@@ -1,6 +1,6 @@
 {.push raises: [], gcsafe.}
 
-import std/[algorithm, sets, tables]
+import std/[algorithm, hashes, sets, tables]
 import ./[types, keys, snapshot]
 import ./parsers/[common, standard, status]
 export types, snapshot
@@ -17,6 +17,7 @@ type
     source, fetchedTimestamp, etag: string
     fetchedAt: int64
     bodyLen: int
+    bodyHash: Hash
 
   CachedSource = object
     source: ParsedSource
@@ -40,7 +41,16 @@ when defined(tklCountParses):
 func origin(content: ListContent, format: ListFormat): SourceOrigin =
   SourceOrigin(id: content.id, format: format, source: content.source,
     fetchedTimestamp: content.fetchedTimestamp, etag: content.etag,
-    fetchedAt: content.fetchedAt, bodyLen: content.body.len)
+    fetchedAt: content.fetchedAt, bodyLen: content.body.len,
+    bodyHash: hash(content.body))
+
+func matches(origin: SourceOrigin, content: ListContent, format: ListFormat): bool =
+  # The body is hashed last, only once all cheaper fields already match.
+  origin.id == content.id and origin.format == format and
+    origin.source == content.source and
+    origin.fetchedTimestamp == content.fetchedTimestamp and
+    origin.etag == content.etag and origin.fetchedAt == content.fetchedAt and
+    origin.bodyLen == content.body.len and origin.bodyHash == hash(content.body)
 
 proc parseContent(
     content: ListContent, format: ListFormat, limits: ParseLimits
@@ -117,10 +127,11 @@ proc reparseCatalogueSources*(
     template initialContent: untyped = config.initialLists[initial.getOrDefault(id)]
     if id notin changed and id in reusable:
       let index = reusable.getOrDefault(id)
-      let first =
-        if id in cached: storedContent.origin(format)
-        else: initialContent.origin(format)
-      if previous.sources[index].origin == first:
+      let origin = previous.sources[index].origin
+      let matched =
+        if id in cached: origin.matches(storedContent, format)
+        else: origin.matches(initialContent, format)
+      if matched:
         reused = index
     if reused < 0:
       var parsed = Result[ParsedSource, TklError].err(
