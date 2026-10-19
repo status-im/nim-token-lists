@@ -157,3 +157,18 @@ suite "refresh parses only changed lists":
       parsed.adoptSources(move(refresh))
       let snapshot = buildFromParsed(parsed, config.chains).get
       check snapshot.getList("main").get.source == stored[0].source
+
+  test "reparse parses a same-length body whose metadata is unchanged":
+    let first = @[ListContent(id: "main", body: listBody("MAIN", '1'),
+      source: "https://example.org/main", etag: "m1")]
+    var parsed = parseCatalogueSources(config, first).get
+    var stored = first
+    stored[0].body = listBody("NIAM", '1')
+    check stored[0].body.len == first[0].body.len
+    parsedContents = 0
+    var refresh = reparseCatalogueSources(parsed, config, stored,
+      initHashSet[string]()).get
+    check parsedContents == 1
+    check not refresh.unchanged
+    parsed.adoptSources(move(refresh))
+    check buildFromParsed(parsed, config.chains).get.getList("main").get.tokens[0].symbol == "NIAM"
