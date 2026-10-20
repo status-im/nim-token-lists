@@ -219,6 +219,7 @@ func BenchmarkByCrossChainIDsPacked(b *testing.B) {
 func BenchmarkUniqueTokensCrossChainFilter(b *testing.B) {
 	h := loadEmbedded(b, mainnets)
 	ids := []string{"usd-coin", "tether", "ethereum", "dai", "status"}
+	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		all, err := h.GetAll(0, 0)
@@ -239,6 +240,7 @@ func BenchmarkUniqueTokensCrossChainFilter(b *testing.B) {
 
 func BenchmarkBySymbolOnChain(b *testing.B) {
 	h := loadEmbedded(b, mainnets)
+	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		page, err := h.GetBySymbolOnChain(1, "usdc")
@@ -252,6 +254,7 @@ func BenchmarkBySymbolOnChain(b *testing.B) {
 // filtered by symbol or name.
 func BenchmarkByChainSymbolFilter(b *testing.B) {
 	h := loadEmbedded(b, mainnets)
+	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		page, err := h.GetByChains([]uint64{1}, 0, 0)
