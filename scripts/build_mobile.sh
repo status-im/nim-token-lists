@@ -69,7 +69,7 @@ case "$target" in
   ios-*) bash scripts/audit_symbols.sh "$OUT/link/libtkl.a" ;;
 esac
 [ "${TKL_BUILD_TESTS:-1}" = 1 ] || exit 0
-for test in smoke lengths; do
+for test in smoke lengths transactions; do
   "$cc" "${cflags[@]+"${cflags[@]}"}" -std=c11 -Wall -Wextra "tests/abi/$test.c" \
     -Iabi "$OUT/link/libtkl.a" -pthread -lm -o "$OUT/$test"
 done

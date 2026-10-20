@@ -13,7 +13,7 @@ bash scripts/isolate_lib.sh
 mkdir -p "$OUT/link"
 cp "$OUT/libtkl_isolated.a" "$OUT/link/libtkl.a"
 bash scripts/audit_symbols.sh "$OUT/link/libtkl.a"
-for test in smoke lengths; do
+for test in smoke lengths transactions; do
   "$cc" -std=c11 -Wall -Wextra "tests/abi/$test.c" -Iabi \
     "$OUT/link/libtkl.a" -pthread -lm -o "$OUT/$test.exe"
   "$OUT/$test.exe"

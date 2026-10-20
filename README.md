@@ -5,6 +5,8 @@ A Nim library for fungible-token lists.
 ## Available functionality
 
 - Deterministic catalogue building, immutable snapshots and paginated queries.
+- A packed binary by-chains query (chain, address, decimals) for balance fetching.
+- Narrow queries for tokens sharing cross-chain ids (packed) and for a symbol or name on one chain.
 - A versioned C ABI exposing the catalogue and transaction operations.
 - A typed Go wrapper that calls the library through C bindings.
 - Token and registry types, normalized token identities, typed errors and custom-token validation.
@@ -42,26 +44,37 @@ make test-differential
 make test-asan
 ```
 
-Go tests cover concurrent access and handle destruction. The separate differential
+Go tests cover concurrent access, handle destruction and reuse of borrowed body
+buffers. `make test-tsan` runs the C ABI tests under ThreadSanitizer. Core
+memory tests use a counting allocator to check that no body is copied or kept,
+that a loaded catalogue stays compact and that chain changes rebuild only indices.
+`TestQueryOutputParity` pins the exact output bytes of every query across
+mutations against golden hashes. The separate differential
 test module compares results against pinned SDK parsers; the production Go module
 has no SDK dependency. AddressSanitizer tests require Clang.
 
 `make test-snapshot-fixture` runs the standalone prototype snapshot tests, which
 are separate from the production core suite and are not required by CI.
 
-Create a handle with `tkl.Create(config)`, then call `LoadStored` once to publish
-the initial catalogue. Queries return typed pages containing a revision, total
-count and items. Call `Destroy` before closing the host's storage. ABI version 2
-replaces the earlier prototype interface; headers and bindings must match.
+Create a handle with `tkl.Create(config)`, then call `LoadStored` once with the
+host's stored and bundled list bodies to publish the initial catalogue. The
+library keeps no list body: bodies are borrowed for the call that parses them,
+and refresh writes are metadata for the host to persist its fetched bytes under.
+Queries return typed pages containing a revision, total count and items. Call
+`Destroy` before closing the host's storage. ABI version 3 replaces version 2;
+headers and bindings must match.
 
 Run `make bench` for Go binding lookup, bulk-read and custom-write benchmarks.
 Run `make bench-parse` to measure parsing the embedded
 CoinGecko Ethereum list in a release build.
-Run `make bench-catalogue` to measure custom updates, owned snapshot copies and
-direct lookups using all eight embedded lists in a release build.
-Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser and
-refresh-state fuzz campaigns under AddressSanitizer. For longer campaigns, run
-`bash scripts/fuzz_core.sh parsers -runs=100000` (or use `planner`).
+Run `make bench-catalogue` to measure loads, custom updates, owned snapshot
+copies, chain changes, direct and batch lookups, bulk reads and refreshes using
+all eight embedded lists, read at run time, in a release build.
+Run `make fuzz-core` with Clang and its libFuzzer runtime for bounded parser,
+refresh-state and parser-differential fuzz campaigns under AddressSanitizer. For
+longer campaigns, run `bash scripts/fuzz_core.sh parsers -runs=100000` (or use
+`planner` or `stream`). The `stream` target compares the single-pass parser with
+the typed decoder it replaced, kept in `tests/oracle/`.
 If Clang lacks the runtime, set `FUZZER_LIB` to a separately built libFuzzer archive.
 
 The core performs no HTTP or storage operations. A host fetches the requests

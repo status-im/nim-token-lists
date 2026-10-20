@@ -3,10 +3,10 @@
 import std/[atomics, locks]
 import ../tokenlists/core/[catalogue, jsoncodec]
 import ../tokenlists/core/types as coreTypes
-import ./rwlock
+import ./published
 
 const
-  TklAbiVersion = 2'u32
+  TklAbiVersion = 3'u32
   MaxHandles = 64
   TklMaxInputBytes {.intdefine.} = 16 * 1024 * 1024
 
@@ -20,8 +20,8 @@ type
   CreateRequest = object
     config: CatalogueConfig
     limits: Opt[ParseLimits]
-  BootstrapRequest = object
-    contents: seq[ListContent]
+  LoadRequest = object
+    stored: seq[ListContent]
     customs: seq[Token]
     state: RefreshState
   Request = object
@@ -29,6 +29,10 @@ type
     chainId: uint64
     chains: seq[uint64]
     keys: seq[string]
+    crossChainIds: seq[string]
+    symbol: string
+    chainIds: seq[uint64]
+    addresses: seq[string]
     offset, limit: int
     revision, mutationId, planId: uint64
     now, refreshSec, checkSec: int64
@@ -38,13 +42,13 @@ type
     results: seq[FetchResult]
     reason: TklStatus
   HandleObj = object
-    rw: RwLock
+    published: Published
     writer: Lock
-    current: ptr Snapshot
     core: ptr Catalogue
     config: CatalogueConfig
     limits: ParseLimits
-    revision: Atomic[uint64]
+    load: ptr CatalogueLoad
+    loadTxn: uint64
   Slot = object
     gen: Atomic[uint32]
     inflight: Atomic[int]
@@ -88,6 +92,24 @@ proc fillBuf(outBuf: ptr TklBuf, value: string): int32 =
     cap: csize_t(max(value.len, 1)))
   int32(Ok)
 
+proc fillOutput(outBuf: ptr TklBuf, output: QueryOutput): bool =
+  ## Writes a query answer straight into one exactly sized C allocation.
+  let size = output.jsonLen
+  let mem = cMalloc(csize_t(max(size, 1)))
+  if mem.isNil: return false
+  output.writeJson(cast[ptr UncheckedArray[char]](mem), size)
+  outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(max(size, 1)))
+  true
+
+proc fillPacked(outBuf: ptr TklBuf, output: QueryOutput): bool =
+  ## Writes a token answer as packed records into one exactly sized allocation.
+  let size = output.packedLen
+  let mem = cMalloc(csize_t(size))
+  if mem.isNil: return false
+  output.writePacked(cast[ptr UncheckedArray[byte]](mem), size)
+  outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(size))
+  true
+
 proc errorBuf(outBuf: ptr TklBuf, error: TklError): int32 =
   if not outBuf.isNil: discard fillBuf(outBuf, Json.encode(error))
   int32(error.code)
@@ -112,12 +134,15 @@ proc enter(handle: uint64, idx: var int, obj: var ptr HandleObj): int32 =
   obj = p
   int32(Ok)
 
-proc readInput(p: cstring, length: csize_t, maxBytes: int): Result[string, TklError] =
-  if p.isNil or length == 0 or length > csize_t(maxBytes):
-    return err(tklError(InvalidArgument, "InvalidInputBuffer"))
-  var value = newString(int(length))
-  copyMem(addr value[0], p, value.len)
-  ok(value)
+template bytes(p: pointer, length: csize_t): openArray[char] =
+  toOpenArray(cast[ptr UncheckedArray[char]](p), 0, int(length) - 1)
+
+func validBytes(p: pointer, length: csize_t, maxBytes: int): bool =
+  ## Borrowed inputs are read in place for the call; nothing retains them.
+  length <= csize_t(maxBytes) and (length == 0 or not p.isNil)
+
+func validInput(p: pointer, length: csize_t, maxBytes: int): bool =
+  length > 0 and validBytes(p, length, maxBytes)
 
 func envelopeLimits(limits: ParseLimits): ParseLimits =
   var bounds = limits
@@ -132,7 +157,7 @@ proc tkl_lib_version(outBuf: ptr TklBuf): int32 {.tklExport.} =
   if outBuf.isNil: return int32(InvalidArgument)
   outBuf[] = TklBuf()
   ensureInit()
-  fillBuf(outBuf, "\"0.2.0\"")
+  fillBuf(outBuf, "\"0.3.0\"")
 
 proc tkl_create(
     abiVer: uint32, data: cstring, length: csize_t,
@@ -147,31 +172,25 @@ proc tkl_create(
   # Foreign threads have no Nim exit hook; drain it after the try scope unwinds.
   defer: GC_fullCollect()
   try:
-    let input = readInput(data, length, TklMaxInputBytes)
-    if input.isErr: return errorBuf(outBuf, input.error)
-    let decoded = decodeDocument(input.get, CreateRequest,
+    if not validInput(data, length, TklMaxInputBytes):
+      return errorBuf(outBuf, tklError(InvalidArgument, "InvalidInputBuffer"))
+    var decoded = decodeDocument(bytes(data, length), CreateRequest,
       envelopeLimits(DefaultParseLimits))
     if decoded.isErr: return errorBuf(outBuf, decoded.error)
-    let cfg = decoded.get
-    let limits = cfg.limits.get(DefaultParseLimits)
+    let limits = decoded.get.limits.get(DefaultParseLimits)
     if limits.maxBytes <= 0 or limits.maxDepth <= 0 or
         limits.maxArrayItems <= 0 or limits.maxObjectMembers <= 0 or
-        limits.maxStringBytes <= 0:
+        limits.maxStringBytes <= 0 or limits.maxRows <= 0:
       return errorBuf(outBuf, tklError(InvalidArgument, "InvalidLimits"))
-    for content in cfg.config.initialLists:
-      if content.body.len > limits.maxBytes:
-        return errorBuf(outBuf, tklError(InvalidArgument, "TooLarge", content.id))
-    if cfg.config.embeddedRegistry.len > limits.maxBytes:
-      return errorBuf(outBuf, tklError(InvalidArgument, "TooLarge", cfg.config.registryId))
     acquire(registryLock)
     defer: release(registryLock)
     for i in 0 ..< MaxHandles:
       if slots[i].obj.load().isNil and not slots[i].closing.load() and
           slots[i].gen.load() < high(uint32) - 1:
         let h = createShared(HandleObj)
-        h.rw.init()
+        h.published.init()
         initLock(h.writer)
-        h.config = cfg.config
+        h.config = move(decoded.get.config)
         h.limits = limits
         let gen = slots[i].gen.fetchAdd(1) + 1
         slots[i].obj.store(h)
@@ -196,33 +215,21 @@ proc tkl_destroy(handle: uint64): int32 {.tklExport.} =
   while slots[i].inflight.load() != 0: cpuRelax()
   slots[i].obj.store(nil)
   discard slots[i].gen.fetchAdd(1)
-  freeValue(h.current)
+  freeValue(h.load)
   freeValue(h.core)
   reset(h.config)
   deinitLock(h.writer)
-  h.rw.deinit()
+  h.published.deinit()
   deallocShared(h)
   slots[i].closing.store(false)
   int32(Ok)
 
 proc publish(h: ptr HandleObj) =
-  if h.core[].revision == h.revision.load(): return
-  # Copy before taking the publication lock; readers never share ORC refs.
-  let next = own(h.core[].snapshot)
-  h.rw.acquireWrite()
-  let old = h.current
-  h.current = next
-  h.revision.store(next[].revision)
-  h.rw.releaseWrite()
-  freeValue(old)
-
-func normalizedList(list: sink TokenList): TokenList =
-  var value = list
-  if string(value.tags).len == 0: value.tags = JsonString("{}")
-  value
+  if h.core[].revision != h.published.revision:
+    h.published.publish(h.core[].published)
 
 type
-  QueryHandler = proc(snapshot: Snapshot, request: Request): Result[string, TklError]
+  QueryHandler = proc(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError]
     {.nimcall, raises: [], gcsafe.}
   WriterHandler = proc(h: ptr HandleObj, request: Request): Result[string, TklError]
     {.nimcall, raises: [], gcsafe.}
@@ -232,27 +239,21 @@ proc encodeResult[T](value: Result[T, TklError]): Result[string, TklError] =
   ok(Json.encode(output))
 
 proc operate(
-    h: ptr HandleObj, input: string, reader: QueryHandler,
-    writer: WriterHandler, bootstrap: bool
+    h: ptr HandleObj, input: openArray[char], outBuf: ptr TklBuf,
+    reader: QueryHandler, writer: WriterHandler, packed: bool
 ): Result[string, TklError] =
-  if bootstrap:
-    let request = ?decodeDocument(input, BootstrapRequest, envelopeLimits(h.limits))
-    acquire(h.writer)
-    defer: release(h.writer)
-    if not h.core.isNil:
-      return err(tklError(Busy, "AlreadyLoaded"))
-    let core = ?initCatalogue(h.config, request.contents, request.customs,
-      h.limits, request.state)
-    h.core = own(core)
-    publish(h)
-    return encodeResult(h.core[].changesSince(0))
   let request = ?decodeDocument(input, Request, envelopeLimits(h.limits))
   if not reader.isNil:
-    h.rw.acquireRead()
-    defer: h.rw.releaseRead()
-    if h.current.isNil:
-      return err(tklError(InvalidArgument, "NotLoaded"))
-    return reader(h.current[], request)
+    h.published.read(snapshot):
+      if snapshot.isNil:
+        return err(tklError(InvalidArgument, "NotLoaded"))
+      # Encoded under the read lock: the output borrows the snapshot.
+      let output = ?reader(snapshot[], request)
+      let filled = if packed: fillPacked(outBuf, output)
+        else: fillOutput(outBuf, output)
+      if not filled:
+        return err(tklError(Internal, "OutOfMemory"))
+      return ok("")
   doAssert not writer.isNil
   acquire(h.writer)
   defer: release(h.writer)
@@ -260,60 +261,138 @@ proc operate(
     return err(tklError(InvalidArgument, "NotLoaded"))
   writer(h, request)
 
-proc run(
-    handle: uint64, data: cstring, length: csize_t, outBuf: ptr TklBuf,
-    reader: QueryHandler = nil, writer: WriterHandler = nil, bootstrap = false
-): int32 =
+template guarded(handle: uint64, outBuf: ptr TklBuf, body: untyped): int32 =
+  ## Enters a live handle, runs `body` (a Result[string, TklError]) and fills
+  ## `outBuf` with its JSON output or error. An empty output means no body.
   if outBuf.isNil: return int32(InvalidArgument)
   outBuf[] = TklBuf()
   var idx: int
-  var h: ptr HandleObj
+  var h {.inject.}: ptr HandleObj
   let rc = enter(handle, idx, h)
   if rc != int32(Ok): return rc
   defer: leave(idx)
   # Run after request/result destructors, before returning to the host thread.
   defer: GC_fullCollect()
   try:
-    let input = readInput(data, length, h.limits.maxBytes)
-    if input.isErr: return errorBuf(outBuf, input.error)
-    let output = operate(h, input.get, reader, writer, bootstrap)
-    if output.isErr: return errorBuf(outBuf, output.error)
-    fillBuf(outBuf, output.get)
+    let output: Result[string, TklError] = body
+    if output.isErr: errorBuf(outBuf, output.error)
+    elif output.get.len == 0: int32(Ok)
+    else: fillBuf(outBuf, output.get)
   except CatchableError:
     errorBuf(outBuf, tklError(Internal, "OperationFailed"))
 
-proc queryByKey(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getByKey(request.key)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc run(
+    handle: uint64, data: cstring, length: csize_t, outBuf: ptr TklBuf,
+    reader: QueryHandler = nil, writer: WriterHandler = nil, packed = false
+): int32 =
+  guarded(handle, outBuf):
+    if not validInput(data, length, h.limits.maxBytes):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidInputBuffer"))
+    else:
+      operate(h, bytes(data, length), outBuf, reader, writer, packed)
 
-proc queryByChainAddress(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getByChainAddress(request.chainId, request.address)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc idOf(p: cstring, length: csize_t, limits: ParseLimits): Result[string, TklError] =
+  if length == 0 or not validBytes(p, length, limits.maxStringBytes):
+    return err(tklError(InvalidArgument, "InvalidListId"))
+  var id = newString(int(length))
+  copyMem(addr id[0], p, int(length))
+  ok(id)
 
-proc queryNative(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = ?snapshot.getNative(request.chainId)
-  ok(Json.encode(coreTypes.Page[Token](revision: snapshot.revision, total: 1, items: @[item])))
+proc loadOf(h: ptr HandleObj, txn: uint64): Result[ptr CatalogueLoad, TklError] =
+  if h.load.isNil or txn == 0 or txn != h.loadTxn:
+    return err(tklError(InvalidArgument, "UnknownLoad"))
+  ok(h.load)
 
-proc queryByKeys(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getByKeys(request.keys))
+proc beginLoad(h: ptr HandleObj, input: openArray[char],
+    outTxn: ptr uint64): Result[string, TklError] =
+  let request = ?decodeDocument(input, LoadRequest, envelopeLimits(h.limits))
+  acquire(h.writer)
+  defer: release(h.writer)
+  if not h.core.isNil:
+    return err(tklError(Busy, "AlreadyLoaded"))
+  if h.loadTxn == high(uint64):
+    return err(tklError(Internal, "LoadIdsExhausted"))
+  let load = ?beginLoad(h.config, request.stored, request.customs, h.limits,
+    request.state)
+  # A new load replaces an open one, whose id becomes stale.
+  freeValue(h.load)
+  h.load = own(load)
+  inc h.loadTxn
+  outTxn[] = h.loadTxn
+  ok("")
 
-proc queryByChains(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getByChains(request.chains, request.offset, request.limit))
+proc loadBody(h: ptr HandleObj, txn: uint64, id: string, origin: BodyOrigin,
+    body: openArray[char]): Result[string, TklError] =
+  acquire(h.writer)
+  defer: release(h.writer)
+  let load = ?h.loadOf(txn)
+  ?load[].loadList(id, origin, body)
+  ok("")
 
-proc queryAll(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  encodeResult(snapshot.getAll(request.offset, request.limit))
+proc finishLoad(h: ptr HandleObj, txn: uint64): Result[string, TklError] =
+  acquire(h.writer)
+  defer: release(h.writer)
+  let load = ?h.loadOf(txn)
+  var open = move(load[])
+  freeValue(h.load)
+  h.load = nil
+  let core = ?finishLoad(move(open))
+  h.core = own(core)
+  publish(h)
+  encodeResult(h.core[].changesSince(0))
 
-proc queryList(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  let item = normalizedList(?snapshot.getList(request.id))
-  ok(Json.encode(coreTypes.Page[TokenList](revision: snapshot.revision, total: 1, items: @[item])))
+proc abortLoad(h: ptr HandleObj, txn: uint64): Result[string, TklError] =
+  acquire(h.writer)
+  defer: release(h.writer)
+  discard ?h.loadOf(txn)
+  freeValue(h.load)
+  h.load = nil
+  ok("")
 
-proc queryLists(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  var page = snapshot.getLists()
-  for item in page.items.mitems: item = normalizedList(move(item))
-  ok(Json.encode(page))
+proc putBody(h: ptr HandleObj, planId: uint64, id: string,
+    body: openArray[char]): Result[string, TklError] =
+  acquire(h.writer)
+  defer: release(h.writer)
+  if h.core.isNil:
+    return err(tklError(InvalidArgument, "NotLoaded"))
+  ?h.core[].refreshPutBody(planId, id, body)
+  ok("")
 
-proc queryDiagnostics(snapshot: Snapshot, request: Request): Result[string, TklError] =
-  ok(Json.encode(snapshot.getDiagnostics()))
+proc queryByKey(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byKeyOutput(request.key)
+
+proc queryByChainAddress(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainAddressOutput(request.chainId, request.address)
+
+proc queryNative(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.nativeOutput(request.chainId)
+
+proc queryByKeys(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byKeysOutput(request.keys)
+
+proc queryByChainAddresses(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainAddressesOutput(request.chainIds, request.addresses)
+
+proc queryByChains(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.byChainsOutput(request.chains, request.offset, request.limit)
+
+proc queryByCrossChainIds(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.byCrossChainIdsOutput(request.crossChainIds))
+
+proc queryBySymbolOnChain(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.bySymbolOnChainOutput(request.chainId, request.symbol)
+
+proc queryAll(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.allOutput(request.offset, request.limit)
+
+proc queryList(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  snapshot.listOutput(request.id)
+
+proc queryLists(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.listsOutput)
+
+proc queryDiagnostics(snapshot: Snapshot, request: Request): Result[QueryOutput, TklError] =
+  ok(snapshot.diagnosticsOutput)
 
 proc updateChains(h: ptr HandleObj, request: Request): Result[string, TklError] =
   let change = ?h.core[].setChains(request.chains)
@@ -377,16 +456,54 @@ proc tkl_revision(handle: uint64): uint64 {.tklExport.} =
   var h: ptr HandleObj
   if enter(handle, idx, h) != int32(Ok): return 0
   defer: leave(idx)
-  h.revision.load()
+  h.published.revision
 
 proc tkl_buf_free(buf: ptr TklBuf) {.tklExport.} =
   if buf.isNil: return
   if not buf.data.isNil: cFree(buf.data)
   buf[] = TklBuf()
 
-proc tkl_load_stored(handle: uint64, data: cstring, length: csize_t,
+proc tkl_load_begin(handle: uint64, data: cstring, length: csize_t,
+    outTxn: ptr uint64, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  if not outTxn.isNil: outTxn[] = 0
+  if outTxn.isNil: return int32(InvalidArgument)
+  guarded(handle, outBuf):
+    if not validInput(data, length, h.limits.maxBytes):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidInputBuffer"))
+    else:
+      beginLoad(h, bytes(data, length), outTxn)
+
+proc tkl_load_list(handle, txn: uint64, id: cstring, idLength: csize_t,
+    origin: uint32, body: cstring, bodyLength: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
-  run(handle, data, length, outBuf, bootstrap = true)
+  guarded(handle, outBuf):
+    let listId = idOf(id, idLength, h.limits)
+    if listId.isErr:
+      Result[string, TklError].err(listId.error)
+    elif origin > uint32(high(BodyOrigin)) or
+        not validBytes(body, bodyLength, high(int)):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidListBody"))
+    else:
+      loadBody(h, txn, listId.get, BodyOrigin(origin), bytes(body, bodyLength))
+
+proc tkl_load_finish(handle, txn: uint64, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  guarded(handle, outBuf):
+    finishLoad(h, txn)
+
+proc tkl_load_abort(handle, txn: uint64, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  guarded(handle, outBuf):
+    abortLoad(h, txn)
+
+proc tkl_refresh_put_body(handle, planId: uint64, id: cstring, idLength: csize_t,
+    body: cstring, bodyLength: csize_t, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  guarded(handle, outBuf):
+    let requestId = idOf(id, idLength, h.limits)
+    if requestId.isErr:
+      Result[string, TklError].err(requestId.error)
+    elif not validBytes(body, bodyLength, high(int)):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidListBody"))
+    else:
+      putBody(h, planId, requestId.get, bytes(body, bodyLength))
 
 proc tkl_set_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
@@ -408,9 +525,46 @@ proc tkl_get_by_keys(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
   run(handle, data, length, outBuf, reader = queryByKeys)
 
+proc tkl_get_by_chain_addresses(handle: uint64, data: cstring, length: csize_t,
+    outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryByChainAddresses)
+
 proc tkl_get_by_chains(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =
   run(handle, data, length, outBuf, reader = queryByChains)
+
+proc packedByChains(h: ptr HandleObj, chains: openArray[uint64],
+    outBuf: ptr TklBuf): Result[string, TklError] =
+  h.published.read(snapshot):
+    if snapshot.isNil:
+      return err(tklError(InvalidArgument, "NotLoaded"))
+    # Written under the read lock straight from the borrowed snapshot.
+    let size = snapshot[].packedLen(chains)
+    let mem = cMalloc(csize_t(size))
+    if mem.isNil:
+      return err(tklError(Internal, "OutOfMemory"))
+    snapshot[].writePacked(chains, cast[ptr UncheckedArray[byte]](mem), size)
+    outBuf[] = TklBuf(data: mem, len: csize_t(size), cap: csize_t(size))
+  ok("")
+
+proc tkl_get_by_chains_packed(handle: uint64, chainIds: ptr uint64,
+    count: csize_t, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  guarded(handle, outBuf):
+    if count > csize_t(h.limits.maxArrayItems) or (count > 0 and chainIds.isNil):
+      Result[string, TklError].err(tklError(InvalidArgument, "InvalidChains"))
+    elif count == 0:
+      packedByChains(h, [], outBuf)
+    else:
+      packedByChains(h, toOpenArray(cast[ptr UncheckedArray[uint64]](chainIds),
+        0, int(count) - 1), outBuf)
+
+proc tkl_get_by_cross_chain_ids_packed(handle: uint64, data: cstring,
+    length: csize_t, outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryByCrossChainIds, packed = true)
+
+proc tkl_get_by_symbol_on_chain(handle: uint64, data: cstring, length: csize_t,
+    outBuf: ptr TklBuf): int32 {.tklExport.} =
+  run(handle, data, length, outBuf, reader = queryBySymbolOnChain)
 
 proc tkl_get_all(handle: uint64, data: cstring, length: csize_t,
     outBuf: ptr TklBuf): int32 {.tklExport.} =

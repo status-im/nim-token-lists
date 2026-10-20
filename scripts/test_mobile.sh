@@ -16,10 +16,14 @@ case "$target" in
     remote="/data/local/tmp/libtkl-tests-$$"
     "$adb" "${selector[@]}" shell mkdir "$remote"
     trap '"$adb" "${selector[@]}" shell rm -r "$remote"' EXIT
-    for test in smoke lengths tkl.test; do
+    # Go tests read fixtures relative to go/tkl; mirror that layout.
+    "$adb" "${selector[@]}" shell mkdir -p "$remote/fixtures" "$remote/go/tkl"
+    "$adb" "${selector[@]}" push fixtures/embedded "$remote/fixtures/"
+    "$adb" "${selector[@]}" push go/tkl/testdata "$remote/go/tkl/"
+    for test in smoke lengths transactions tkl.test; do
       "$adb" "${selector[@]}" push "$out/$test" "$remote/$test"
       "$adb" "${selector[@]}" shell chmod 700 "$remote/$test"
-      "$adb" "${selector[@]}" shell "$remote/$test"
+      "$adb" "${selector[@]}" shell "TKL_TEST_DIR=$remote/go/tkl" "$remote/$test"
     done
     ;;
   ios-simulator-arm64|ios-simulator-x86_64)
@@ -29,9 +33,9 @@ case "$target" in
     actual="$(uname -m)"
     [ "$actual" = "$expected" ] || { echo "Expected $expected simulator, got $actual" >&2; exit 1; }
     out="$(cd "$out" && pwd)"
-    for test in smoke lengths tkl.test; do
+    for test in smoke lengths transactions tkl.test; do
       codesign --force --sign - "$out/$test"
-      xcrun simctl spawn "$SIMULATOR_UDID" "$out/$test"
+      SIMCTL_CHILD_TKL_TEST_DIR="$PWD/go/tkl" xcrun simctl spawn "$SIMULATOR_UDID" "$out/$test"
     done
     ;;
   *) echo "Physical iOS devices require a signed application harness; unsupported runner: $target" >&2; exit 1 ;;

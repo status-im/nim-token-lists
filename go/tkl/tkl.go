@@ -10,6 +10,7 @@ package tkl
 */
 import "C"
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"unsafe"
@@ -57,6 +58,7 @@ func (e *Error) Is(target error) bool { s, ok := target.(Status); return ok && s
 
 // Handle is safe for concurrent calls. Hosts serialize persistence and commit
 // against other mutations; neither Go nor Nim retains host byte pointers.
+// List bodies are borrowed for one call and may be reused once it returns.
 type Handle struct{ h C.uint64_t }
 
 func ABIVersion() uint32 { return uint32(C.tkl_abi_version()) }
@@ -149,10 +151,90 @@ func call[T any](h *Handle, invoke operation, input any) (T, error) {
 	return result, err
 }
 
-func (h *Handle) LoadStored(bootstrap Bootstrap) (Page[Change], error) {
-	return call[Page[Change]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
-		return C.tkl_load_stored(handle, data, length, out)
-	}, bootstrap)
+func bytesArg(data []byte) (*C.char, C.size_t) {
+	return (*C.char)(unsafe.Pointer(unsafe.SliceData(data))), C.size_t(len(data))
+}
+func stringArg(value string) (*C.char, C.size_t) {
+	return (*C.char)(unsafe.Pointer(unsafe.StringData(value))), C.size_t(len(value))
+}
+func (h *Handle) bodyCall(invoke func(*C.TklBuf) C.int32_t) error {
+	if h == nil {
+		return InvalidHandle
+	}
+	var out C.TklBuf
+	rc := invoke(&out)
+	return statusError(rc, takeBuf(&out))
+}
+
+// LoadBegin opens a load of the host's persisted state and returns its id.
+func (h *Handle) LoadBegin(bootstrap Bootstrap) (uint64, error) {
+	if h == nil {
+		return 0, InvalidHandle
+	}
+	data, err := json.Marshal(bootstrap)
+	if err != nil {
+		return 0, err
+	}
+	var txn C.uint64_t
+	var out C.TklBuf
+	p, n := bytesArg(data)
+	rc := C.tkl_load_begin(h.h, p, n, &txn, &out)
+	if err = statusError(rc, takeBuf(&out)); err != nil {
+		return 0, err
+	}
+	return uint64(txn), nil
+}
+
+// LoadList parses one body into the open load; body is not retained.
+func (h *Handle) LoadList(txn uint64, id string, origin BodyOrigin, body []byte) error {
+	return h.bodyCall(func(out *C.TklBuf) C.int32_t {
+		idp, idn := stringArg(id)
+		p, n := bytesArg(body)
+		return C.tkl_load_list(h.h, C.uint64_t(txn), idp, idn, C.uint32_t(origin), p, n, out)
+	})
+}
+
+// LoadFinish publishes revision one from the bodies loaded so far.
+func (h *Handle) LoadFinish(txn uint64) (Page[Change], error) {
+	var result Page[Change]
+	if h == nil {
+		return result, InvalidHandle
+	}
+	var out C.TklBuf
+	rc := C.tkl_load_finish(h.h, C.uint64_t(txn), &out)
+	body := takeBuf(&out)
+	if err := statusError(rc, body); err != nil {
+		return result, err
+	}
+	err := json.Unmarshal(body, &result)
+	return result, err
+}
+
+func (h *Handle) LoadAbort(txn uint64) error {
+	return h.bodyCall(func(out *C.TklBuf) C.int32_t {
+		return C.tkl_load_abort(h.h, C.uint64_t(txn), out)
+	})
+}
+
+// LoadStored loads in one call: stored bodies first, so bundled lists replaced
+// by usable stored copies are never parsed. A failed load is aborted.
+func (h *Handle) LoadStored(bootstrap Bootstrap, bodies []ListBody) (Page[Change], error) {
+	txn, err := h.LoadBegin(bootstrap)
+	if err != nil {
+		return Page[Change]{}, err
+	}
+	for _, origin := range []BodyOrigin{Stored, Bundled} {
+		for _, body := range bodies {
+			if body.Origin != origin {
+				continue
+			}
+			if err = h.LoadList(txn, body.ID, body.Origin, body.Data); err != nil {
+				_ = h.LoadAbort(txn)
+				return Page[Change]{}, err
+			}
+		}
+	}
+	return h.LoadFinish(txn)
 }
 
 func (h *Handle) GetAll(offset, limit int) (Page[Token], error) {
@@ -187,6 +269,22 @@ func (h *Handle) GetByKeys(keys []string) (Page[Token], error) {
 	}{keys})
 }
 
+// GetByChainAddresses looks up many tokens in one call; unknown pairs are
+// omitted and the rest keep request order.
+func (h *Handle) GetByChainAddresses(pairs []Identity) (Page[Token], error) {
+	chainIDs := make([]uint64, len(pairs))
+	addresses := make([]string, len(pairs))
+	for i, pair := range pairs {
+		chainIDs[i], addresses[i] = pair.ChainID, pair.Address
+	}
+	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
+		return C.tkl_get_by_chain_addresses(handle, data, length, out)
+	}, struct {
+		ChainIDs  []uint64 `json:"chainIds,omitempty"`
+		Addresses []string `json:"addresses,omitempty"`
+	}{chainIDs, addresses})
+}
+
 func (h *Handle) GetByChains(chains []uint64, offset, limit int) (Page[Token], error) {
 	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
 		return C.tkl_get_by_chains(handle, data, length, out)
@@ -195,6 +293,84 @@ func (h *Handle) GetByChains(chains []uint64, offset, limit int) (Page[Token], e
 		Offset int      `json:"offset"`
 		Limit  int      `json:"limit"`
 	}{chains, offset, limit})
+}
+
+// ChainToken is a catalogue token narrowed to what balance fetching reads.
+type ChainToken struct {
+	ChainID  uint64
+	Address  [20]byte
+	Decimals uint8
+}
+
+// GetByChainsPacked answers GetByChains(chains, 0, 0) as ChainTokens, in the
+// same order, without JSON. It fills dst[:0] when it has room, otherwise one
+// new slice, and also returns the revision answered.
+func (h *Handle) GetByChainsPacked(chains []uint64, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if h == nil {
+		return dst[:0], 0, InvalidHandle
+	}
+	var out C.TklBuf
+	rc := C.tkl_get_by_chains_packed(h.h, (*C.uint64_t)(unsafe.SliceData(chains)), C.size_t(len(chains)), &out)
+	return decodePacked(rc, &out, dst)
+}
+
+// GetByCrossChainIDsPacked answers the tokens whose cross-chain id is one of
+// the non-empty ids, in GetAll order, as ChainTokens without JSON output. It
+// fills dst like GetByChainsPacked.
+func (h *Handle) GetByCrossChainIDsPacked(ids []string, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if h == nil {
+		return dst[:0], 0, InvalidHandle
+	}
+	data, err := json.Marshal(struct {
+		CrossChainIDs []string `json:"crossChainIds,omitempty"`
+	}{ids})
+	if err != nil {
+		return dst[:0], 0, err
+	}
+	var out C.TklBuf
+	p, n := bytesArg(data)
+	rc := C.tkl_get_by_cross_chain_ids_packed(h.h, p, n, &out)
+	return decodePacked(rc, &out, dst)
+}
+
+// decodePacked releases a packed answer after decoding it into dst.
+func decodePacked(rc C.int32_t, out *C.TklBuf, dst []ChainToken) ([]ChainToken, uint64, error) {
+	if rc != 0 {
+		return dst[:0], 0, statusError(rc, takeBuf(out))
+	}
+	defer C.tkl_buf_free(out)
+	const header, record = C.TKL_PACKED_HEADER_BYTES, C.TKL_PACKED_RECORD_BYTES
+	data := unsafe.Slice((*byte)(unsafe.Pointer(out.data)), int(out.len))
+	if len(data) < header || binary.LittleEndian.Uint32(data) != C.TKL_PACKED_MAGIC {
+		return dst[:0], 0, Internal
+	}
+	count := int(binary.LittleEndian.Uint32(data[4:]))
+	if len(data) != header+count*record {
+		return dst[:0], 0, Internal
+	}
+	if cap(dst) < count {
+		dst = make([]ChainToken, count)
+	}
+	dst = dst[:count]
+	for i := range dst {
+		r := data[header+i*record : header+(i+1)*record]
+		dst[i].ChainID = binary.LittleEndian.Uint64(r)
+		copy(dst[i].Address[:], r[8:28])
+		dst[i].Decimals = r[28]
+	}
+	return dst, binary.LittleEndian.Uint64(data[8:]), nil
+}
+
+// GetBySymbolOnChain answers the chain's tokens whose symbol or name equals
+// symbol ignoring ASCII case, in GetByChains order: legacy payment requests
+// name a token only by symbol.
+func (h *Handle) GetBySymbolOnChain(chainID uint64, symbol string) (Page[Token], error) {
+	return call[Page[Token]](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
+		return C.tkl_get_by_symbol_on_chain(handle, data, length, out)
+	}, struct {
+		ChainID uint64 `json:"chainId"`
+		Symbol  string `json:"symbol"`
+	}{chainID, symbol})
 }
 
 func (h *Handle) GetList(id string) (Page[TokenList], error) {
@@ -259,7 +435,26 @@ func (h *Handle) RefreshPlan(now int64, force bool) (RefreshPlan, error) {
 	}, map[string]any{"now": now, "force": force})
 }
 
+// RefreshPutBody validates and parses one fetched body of the current round.
+func (h *Handle) RefreshPutBody(planID uint64, id string, body []byte) error {
+	return h.bodyCall(func(out *C.TklBuf) C.int32_t {
+		idp, idn := stringArg(id)
+		p, n := bytesArg(body)
+		return C.tkl_refresh_put_body(h.h, C.uint64_t(planID), idp, idn, p, n, out)
+	})
+}
+
+// RefreshApply puts the non-nil body of every successful response, then
+// applies the batch; a nil Body keeps one already passed to RefreshPutBody.
+// Report writes are metadata: persist the fetched bodies by write ID.
 func (h *Handle) RefreshApply(id uint64, results []FetchResult, now int64) (RefreshReport, error) {
+	for _, result := range results {
+		if result.Status == 200 && result.Failure == nil && result.Body != nil {
+			if err := h.RefreshPutBody(id, result.ID, result.Body); err != nil {
+				return RefreshReport{}, err
+			}
+		}
+	}
 	return call[RefreshReport](h, func(handle C.uint64_t, data *C.char, length C.size_t, out *C.TklBuf) C.int32_t {
 		return C.tkl_refresh_apply(handle, data, length, out)
 	}, struct {
