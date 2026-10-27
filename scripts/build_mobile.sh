@@ -24,9 +24,16 @@ case "$target" in
     esac
     toolchain="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$host/bin"
     [ -x "$toolchain/llvm-ar" ] || fail "NDK archiver not found: $toolchain/llvm-ar"
-    # Nim's Linux Clang backend runs llvm-ar by name before our isolation step.
-    # TKL_AR only configures isolation; use the same NDK tools for both stages.
-    export PATH="$toolchain:$PATH"
+    # Nim archives the static library itself, with a command chosen by the host
+    # Nim was built on (compiler/extccomp.nim): `llvm-ar rcs` on Linux, `ar rcs`
+    # on macOS. The NDK ships no plain `ar`, so on a macOS host Apple's ar would
+    # archive the ELF objects and produce an unindexed or empty libtkl.a. Expose
+    # the NDK archiver under both names ahead of everything else. TKL_AR only
+    # configures the isolation step; both stages use the same NDK tools.
+    case "$OUT" in /*) host_bin="$OUT/host-bin" ;; *) host_bin="$PWD/$OUT/host-bin" ;; esac
+    mkdir -p "$host_bin"
+    ln -sf "$toolchain/llvm-ar" "$host_bin/ar"
+    export PATH="$host_bin:$toolchain:$PATH"
     triple=aarch64-linux-android
     [ "$arch" != x86_64 ] || triple=x86_64-linux-android
     cc="$toolchain/$triple$api-clang"
@@ -61,6 +68,8 @@ flags+=(--clang.exe:"$cc" --clang.linkerexe:"$cc")
 # Bash 3.2 treats an empty array as unset under nounset.
 for flag in "${cflags[@]+"${cflags[@]}"}"; do flags+=(--passC:"$flag"); done
 bash scripts/build_lib.sh "${flags[@]}"
+# A foreign host archiver can leave an archive with no usable members.
+"${TKL_AR:-ar}" t "$OUT/libtkl.a" | grep -q '\.o$' || fail "Nim produced an empty archive: $OUT/libtkl.a"
 bash scripts/isolate_lib.sh
 mkdir -p "$OUT/link"
 cp "$OUT/libtkl_isolated.a" "$OUT/link/libtkl.a"
