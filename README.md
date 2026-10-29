@@ -124,6 +124,35 @@ must pass before Windows support is considered verified.
 The main CI workflow calls both platform workflows and includes their results
 in the `PR checks` gate; a failed, skipped or cancelled platform job fails it.
 
+## Nimble library tasks
+
+`tokenlists.nimble` has the library tasks `libtkl`, `libtklAndroid` and
+`libtklIOS` (Status Nim library build contract). Standalone, in a checkout:
+`nimble libtkl`. Embedders run them with plain nim from the installed package,
+through a `.nims` wrapper that includes it:
+
+```sh
+printf 'include "%s"\n' <pkg>/tokenlists.nimble > "$LIB_OUT_DIR/tokenlists.nims"
+LIB_OUT_DIR=... NIM_PARAMS="--path:<dep> ..." nim libtkl "$LIB_OUT_DIR/tokenlists.nims"
+```
+
+- `NIM`: compiler; defaults to the one running the task.
+- `NIM_PARAMS`: appended last; trusted input, evaluated as POSIX shell words
+  (`'--path:/a b/dep'` stays one argument). It is not the `nimble.paths` form:
+  convert those lines with `unescape` + `quoteShellPosix`. The embedded form passes
+  `--noNimblePath` before it, so a missing dependency `--path` fails the build.
+  Under nimble the checkout's `nimble.paths` (`nimble setup`) is used, converted
+  the same way, else the nimble store.
+- `LIB_OUT_DIR`: all outputs; required in a store entry, defaults to `build`
+  (or `build/<target>`) in a checkout. Results: `$LIB_OUT_DIR/link/libtkl.a`
+  and `tkl.h`.
+- `libtklIOS`: `IPHONE_SDK=iphoneos` (default, `ARCH=arm64`) or
+  `iphonesimulator` (`ARCH=arm64|x86_64`). `libtklAndroid`: `ARCH=arm64|x86_64`.
+- `TKL_BUILD_TESTS=1` also builds the mobile test executables; needs a checkout.
+
+`make lib`, `make isolate` and `scripts/build_lib.sh` keep using the vendored
+submodules.
+
 Mobile CI builds all five targets and runs Android x86_64 plus the runner's
 native iOS simulator architecture. This is library coverage, not proof of full
 status-go linking, SDS coexistence, application packaging or physical-device

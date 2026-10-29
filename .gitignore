@@ -3,3 +3,6 @@ nimcache/
 *.o
 *.test
 .superpowers/
+/nimble.paths
+/nimble.develop
+/config.nims
