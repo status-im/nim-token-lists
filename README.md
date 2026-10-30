@@ -132,8 +132,7 @@ in the `PR checks` gate; a failed, skipped or cancelled platform job fails it.
 through a `.nims` wrapper that includes it:
 
 ```sh
-printf 'include "%s"\n' <pkg>/tokenlists.nimble > "$LIB_OUT_DIR/tokenlists.nims"
-LIB_OUT_DIR=... NIM_PARAMS="--path:<dep> ..." nim libtkl "$LIB_OUT_DIR/tokenlists.nims"
+LIB_OUT_DIR=... NIM_PARAMS="--path:<dep> ..." nim libtkl <pkg>/libtkl.nims
 ```
 
 - `NIM`: compiler; defaults to the one running the task.
