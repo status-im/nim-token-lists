@@ -10,15 +10,14 @@ requires "nim >= 2.2.10", "results >= 0.5.1", "json_serialization >= 0.5.0",
 skipDirs = @["go", "build", "docs", "fixtures", "tests", "vendor"]
 # The library tasks build from an installed package too.
 installDirs = @["abi", "scripts", "tokenlists"]
+installFiles = @["libtkl.nims"]
 
 task test, "Run core tests with vendored dependency pins":
   exec "bash scripts/test_core.sh"
 
 # The library tasks follow the Nim library build contract. Embedders run them
-# with plain nim through a wrapper that includes this file:
-#   printf 'include "%s"\n' <pkg>/tokenlists.nimble > "$LIB_OUT_DIR/tokenlists.nims"
-#   nim libtkl "$LIB_OUT_DIR/tokenlists.nims"
-# thisDir() is then the wrapper's dir, so the package dir comes from this file.
+# with plain nim through libtkl.nims, which includes this file:
+#   nim libtkl <pkg>/libtkl.nims
 const pkgDir = currentSourcePath().parentDir
 
 proc writable(dir: string): bool =
