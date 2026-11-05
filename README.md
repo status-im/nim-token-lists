@@ -124,33 +124,34 @@ must pass before Windows support is considered verified.
 The main CI workflow calls both platform workflows and includes their results
 in the `PR checks` gate; a failed, skipped or cancelled platform job fails it.
 
-## Nimble library tasks
+## Building the library
 
-`tokenlists.nimble` has the library tasks `libtkl`, `libtklAndroid` and
-`libtklIOS` (Status Nim library build contract). Standalone, in a checkout:
-`nimble libtkl`. Embedders run them with plain nim from the installed package,
-through a `.nims` wrapper that includes it:
+A caller builds the library from the package with plain `nim c`; there is no
+build task or script. What it gets: the entry `abi/libtkl.nim`, the public
+header `abi/tkl.h` and the C API prefix `tkl_`.
 
 ```sh
-LIB_OUT_DIR=... NIM_PARAMS="--path:<dep> ..." nim libtkl <pkg>/libtkl.nims
+nim c --skipParentCfg --noNimblePath <target> <policy> --path:<dep> ... \
+  --nimcache:<out>/nimcache -o:<out>/libtkl.a <pkg>/abi/libtkl.nim
 ```
 
-- `NIM`: compiler; defaults to the one running the task.
-- `NIM_PARAMS`: appended last; trusted input, evaluated as POSIX shell words
-  (`'--path:/a b/dep'` stays one argument). It is not the `nimble.paths` form:
-  convert those lines with `unescape` + `quoteShellPosix`. The embedded form passes
-  `--noNimblePath` before it, so a missing dependency `--path` fails the build.
-  Under nimble the checkout's `nimble.paths` (`nimble setup`) is used, converted
-  the same way, else the nimble store.
-- `LIB_OUT_DIR`: all outputs; required in a store entry, defaults to `build`
-  (or `build/<target>`) in a checkout. Results: `$LIB_OUT_DIR/link/libtkl.a`
-  and `tkl.h`.
-- `libtklIOS`: `IPHONE_SDK=iphoneos` (default, `ARCH=arm64`) or
-  `iphonesimulator` (`ARCH=arm64|x86_64`). `libtklAndroid`: `ARCH=arm64|x86_64`.
-- `TKL_BUILD_TESTS=1` also builds the mobile test executables; needs a checkout.
+`abi/config.nims` is the default configuration of every build of
+`abi/libtkl.nim` (Nim reads it under `--skipParentCfg` too): a static library
+(`--app:lib` builds a shared one) with the `libtkl` Nim main prefix, hidden
+visibility, no common symbols and `-d:useMalloc`. Flags given on the command
+line win; `abi/libtkl.nim` fails to compile without ORC (or ARC) and
+`--threads:on`. The target, its toolchain, the policy, the outputs and the link
+are the caller's.
 
-`make lib`, `make isolate` and `scripts/build_lib.sh` keep using the vendored
-submodules.
+A program that links libtkl next to another Nim library (status-go: libsds)
+must seal it, so the two Nim runtimes cannot clash: one relocatable object in
+which only the C API, `tkl_*` (what `abi/tkl.h` declares), stays global.
+`scripts/isolate_lib.sh` is this repo's test of that: `make audit` seals
+`build/libtkl.a` and checks that the result exports exactly that list.
+
+`make lib` builds `build/libtkl.a` with the vendored submodules and this
+repo's policy (`-d:release`), plus `NIM_PARAMS` from the environment (POSIX
+shell words); the CI scripts add their target that way, then seal and audit.
 
 Mobile CI builds all five targets and runs Android x86_64 plus the runner's
 native iOS simulator architecture. This is library coverage, not proof of full

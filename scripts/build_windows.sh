@@ -2,13 +2,13 @@
 # Run in an x86_64 MinGW environment; CI must verify COFF symbol isolation.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export OUT="${OUT:-build/windows-x86_64}" TKL_TARGET_OS=Windows
+export OUT="${OUT:-build/windows-x86_64}"
 cc="${CC:-gcc}"
 "$cc" -dumpmachine | grep -Eq '^x86_64-.*mingw' || {
   echo 'Windows builds require an x86_64 MinGW compiler' >&2; exit 1;
 }
-bash scripts/build_lib.sh --os:windows --cpu:amd64 --cc:gcc \
-  --gcc.exe:"$cc" --gcc.linkerexe:"$cc"
+printf -v params '%q ' --os:windows --cpu:amd64 --cc:gcc --gcc.exe:"$cc" --gcc.linkerexe:"$cc"
+NIM_PARAMS="$params" make --no-print-directory lib OUT="$OUT"
 bash scripts/isolate_lib.sh
 mkdir -p "$OUT/link"
 cp "$OUT/libtkl_isolated.a" "$OUT/link/libtkl.a"

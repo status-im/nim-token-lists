@@ -231,7 +231,7 @@ calls, waits for in-flight calls and frees state; stale generations are invalid.
 Calls can originate on arbitrary host threads under ORC/useMalloc. No callbacks
 or library-created worker threads are used. Hosts still serialize durable writes
 and commit against other mutations; per-call locking cannot cover a host database
-transaction. The exported symbol allowlists contain only `tkl_` symbols.
+transaction. The C API is `tkl_*`, as `abi/tkl.h` declares; sealed, nothing else stays global.
 
 ## Refresh planning
 

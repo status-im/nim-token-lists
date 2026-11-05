@@ -16,7 +16,7 @@ ARCHS = (("arm64", "aarch64"), ("x86_64", "x86_64"))
 
 
 class AndroidToolchainTest(unittest.TestCase):
-    def prepare(self, tmp, host_os, host_dir, nim_archiver, arch, triple, members="member.o"):
+    def prepare(self, tmp, host_os, host_dir, nim_archiver, arch, triple):
         root = Path(tmp)
         scripts = root / "scripts"
         scripts.mkdir()
@@ -33,13 +33,11 @@ class AndroidToolchainTest(unittest.TestCase):
         executable(host / "uname", f"echo {host_os}")
         for name in ("ar", "llvm-ar"):
             executable(host / name, "echo wrong-host-archiver >&2; exit 99")
-        # The NDK archiver records its use and lists the archive members.
-        executable(tools / "llvm-ar",
-                   f'case "$1" in t) printf "%s\\n" {members!r} ;; '
-                   f'*) echo ndk > "$OUT/archiver-used" ;; esac')
+        # The NDK archiver records its use.
+        executable(tools / "llvm-ar", 'echo ndk > "$OUT/archiver-used"')
         executable(tools / (triple + "-linux-android28-clang"), ":")
-        # Nim's library step, as run on this host.
-        executable(scripts / "build_lib.sh",
+        # `make lib`: Nim's library step, as run on this host.
+        executable(host / "make",
                    f'mkdir -p "$OUT"; : > "$OUT/libtkl.a"; {nim_archiver} rcs "$OUT/libtkl.a"')
         executable(scripts / "isolate_lib.sh",
                    'cp "$OUT/libtkl.a" "$OUT/libtkl_isolated.a"')
@@ -58,13 +56,6 @@ class AndroidToolchainTest(unittest.TestCase):
                     root, result = self.prepare(tmp, host_os, host_dir, nim_archiver, arch, triple)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual((root / "output/archiver-used").read_text(), "ndk\n")
-
-    def test_empty_archive_fails_before_isolation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root, result = self.prepare(tmp, *HOSTS[0], *ARCHS[0], members="")
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("empty archive", result.stderr)
-            self.assertFalse((root / "output/libtkl_isolated.a").exists())
 
 
 if __name__ == "__main__":

@@ -37,8 +37,9 @@ case "$target" in
     triple=aarch64-linux-android
     [ "$arch" != x86_64 ] || triple=x86_64-linux-android
     cc="$toolchain/$triple$api-clang"
-    export TKL_TARGET_OS=Android TKL_LD="$toolchain/ld.lld"
+    export TKL_LD="$toolchain/ld.lld"
     export TKL_OBJCOPY="$toolchain/llvm-objcopy" TKL_AR="$toolchain/llvm-ar"
+    export NM="$toolchain/llvm-nm"
     flags+=(-d:android --passC:-fPIC)
     goos=android
     ;;
@@ -48,17 +49,16 @@ case "$target" in
     minimum="${IOS_TARGET:-$default_minimum}"
     [[ "$minimum" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || fail "Invalid IOS_TARGET"
     (( ${minimum%%.*} >= ${default_minimum%%.*} )) || fail "$target requires iOS $default_minimum or newer"
-    export TKL_TARGET_OS=Darwin TKL_ARCH="$arch" TKL_MIN_OS="$minimum"
-    export TKL_SDK=iphoneos TKL_PLATFORM=ios
+    sdk=iphoneos
     triple="$arch-apple-ios$minimum"
     if [[ "$target" == ios-simulator-* ]]; then
-      export TKL_SDK=iphonesimulator TKL_PLATFORM=ios-simulator
+      sdk=iphonesimulator
       triple="$triple-simulator"
     fi
-    cc="$(xcrun --sdk "$TKL_SDK" --find clang)"
-    export TKL_LD="$(xcrun --sdk "$TKL_SDK" --find ld)"
-    export TKL_LIBTOOL="$(xcrun --sdk "$TKL_SDK" --find libtool)"
-    cflags=(-target "$triple" -isysroot "$(xcrun --sdk "$TKL_SDK" --show-sdk-path)")
+    cc="$(xcrun --sdk "$sdk" --find clang)"
+    export TKL_LD="$(xcrun --sdk "$sdk" --find ld)"
+    export TKL_LIBTOOL="$(xcrun --sdk "$sdk" --find libtool)"
+    cflags=(-target "$triple" -isysroot "$(xcrun --sdk "$sdk" --show-sdk-path)")
     flags=(--cpu:"$cpu" --os:ios --cc:clang)
     goos=ios
     ;;
@@ -67,16 +67,13 @@ esac
 flags+=(--clang.exe:"$cc" --clang.linkerexe:"$cc")
 # Bash 3.2 treats an empty array as unset under nounset.
 for flag in "${cflags[@]+"${cflags[@]}"}"; do flags+=(--passC:"$flag"); done
-bash scripts/build_lib.sh "${flags[@]}"
-# A foreign host archiver can leave an archive with no usable members.
-"${TKL_AR:-ar}" t "$OUT/libtkl.a" | grep -q '\.o$' || fail "Nim produced an empty archive: $OUT/libtkl.a"
+printf -v params '%q ' "${flags[@]}"
+NIM_PARAMS="$params" make --no-print-directory lib OUT="$OUT"
+# This repo links libtkl alone, but tests it sealed, as status-go links it.
 bash scripts/isolate_lib.sh
 mkdir -p "$OUT/link"
 cp "$OUT/libtkl_isolated.a" "$OUT/link/libtkl.a"
-case "$target" in
-  android-*) NM="$toolchain/llvm-nm" bash scripts/audit_symbols.sh "$OUT/link/libtkl.a" ;;
-  ios-*) bash scripts/audit_symbols.sh "$OUT/link/libtkl.a" ;;
-esac
+bash scripts/audit_symbols.sh "$OUT/link/libtkl.a"
 [ "${TKL_BUILD_TESTS:-1}" = 1 ] || exit 0
 for test in smoke lengths transactions; do
   "$cc" "${cflags[@]+"${cflags[@]}"}" -std=c11 -Wall -Wextra "tests/abi/$test.c" \
