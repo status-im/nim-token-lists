@@ -150,8 +150,9 @@ which only the C API, `tkl_*` (what `abi/tkl.h` declares), stays global.
 `build/libtkl.a` and checks that the result exports exactly that list.
 
 `make lib` builds `build/libtkl.a` with the vendored submodules and this
-repo's policy (`-d:release`), plus `NIM_PARAMS` from the environment (POSIX
-shell words); the CI scripts add their target that way, then seal and audit.
+repo's policy (`-d:release`), plus `NIM_PARAMS` (POSIX shell words, on the
+make command line or in the environment). `make lib-android` and `make lib-ios`
+append their target flags to the caller's, then seal and audit.
 
 Mobile CI builds all five targets and runs Android x86_64 plus the runner's
 native iOS simulator architecture. This is library coverage, not proof of full

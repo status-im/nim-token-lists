@@ -48,6 +48,8 @@ jobs:
         run: python3 tests/tooling/test_symbol_audit.py
       - name: Verify Android toolchain selection
         run: python3 tests/tooling/test_android_toolchain.py
+      - name: Verify mobile builds keep their target flags
+        run: python3 tests/tooling/test_mobile_params.py
       - name: Validate workflows
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

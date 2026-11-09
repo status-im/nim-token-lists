@@ -68,7 +68,10 @@ flags+=(--clang.exe:"$cc" --clang.linkerexe:"$cc")
 # Bash 3.2 treats an empty array as unset under nounset.
 for flag in "${cflags[@]+"${cflags[@]}"}"; do flags+=(--passC:"$flag"); done
 printf -v params '%q ' "${flags[@]}"
-NIM_PARAMS="$params" make --no-print-directory lib OUT="$OUT"
+# On the command line: a NIM_PARAMS the caller passed to the outer make reaches
+# this one through MAKEFLAGS and would override an environment value. The
+# target flags come last, so they win over the caller's.
+make --no-print-directory lib OUT="$OUT" NIM_PARAMS="${NIM_PARAMS:-} $params"
 # This repo links libtkl alone, but tests it sealed, as status-go links it.
 bash scripts/isolate_lib.sh
 mkdir -p "$OUT/link"
