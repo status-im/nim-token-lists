@@ -45,7 +45,6 @@ jobs:
           if [[ -f build/windows-x86_64/libtkl_isolated.a ]]; then
             nm -g build/windows-x86_64/libtkl_isolated.a > build/windows-symbols.txt
           fi
-          git ls-files --eol abi/exports-linux.txt > build/windows-line-endings.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: failure()
         with:

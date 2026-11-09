@@ -4,8 +4,10 @@ NIM_TEST_FLAGS := --mm:orc -d:useMalloc --threads:on --skipParentCfg:on --nimcac
 GO_LIB_STAMP = -ldflags=-X=main.tklLibStamp=$(firstword $(shell cksum build/libtkl.a))
 
 .PHONY: lib test-core test-snapshot-fixture test-c test-go test-differential test-asan test-tsan bench bench-parse bench-catalogue fuzz-core isolate audit clean
+OUT ?= build
 lib:
-	NIM="$(NIM)" scripts/build_lib.sh
+	"$(NIM)" c --skipUserCfg:on --skipParentCfg:on $(addprefix --path:vendor/,nim-result nim-stew nim-faststreams nim-serialization nim-json-serialization) -d:release $(NIM_PARAMS) \
+	  --nimcache:"$(OUT)/nimcache" -o:"$(OUT)/libtkl.a" abi/libtkl.nim
 .PHONY: lib-android lib-ios test-windows
 lib-android:
 	NIM="$(NIM)" bash scripts/build_mobile.sh android-$(or $(ARCH),arm64)
@@ -47,8 +49,9 @@ test-tsan:
 	NIM="$(NIM)" bash scripts/test_tsan.sh
 bench: lib
 	cd go/tkl && CGO_CFLAGS="-I$(CURDIR)/abi" CGO_LDFLAGS="-L$(CURDIR)/build" go test -run '^$$' -bench . -benchmem $(GO_LIB_STAMP) ./...
+# The sealed archive, as status-go links it: only the tkl_* exports stay global.
 isolate: lib
-	scripts/isolate_lib.sh
+	OUT="$(OUT)" scripts/isolate_lib.sh
 audit: isolate
 	bash tests/symbols/test_audit.sh
 clean:

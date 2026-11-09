@@ -19,8 +19,8 @@ class SymbolAuditTest(unittest.TestCase):
                         (root / "scripts").mkdir()
                         (root / "abi").mkdir()
                         shutil.copy(source / "scripts/audit_symbols.sh", root / "scripts")
-                        (root / "abi/exports-linux.txt").write_bytes(
-                            ("tkl_create" + ending).encode())
+                        (root / "abi/tkl.h").write_bytes(
+                            ("int tkl_create(void);" + ending).encode())
                         symbols = "00000000 T tkl_create" + ending
                         if unexpected:
                             symbols += "00000001 T leaked_runtime_symbol" + ending

@@ -13,6 +13,11 @@ const
 static:
   doAssert TklMaxInputBytes > 0
 
+# Readers on any host thread borrow one published snapshot: that needs one
+# shared heap, which refc does not have.
+when not (defined(gcOrc) or defined(gcArc)) or not compileOption("threads"):
+  {.error: "libtkl needs --mm:orc (or arc) and --threads:on".}
+
 type
   TklBuf {.bycopy.} = object
     data: pointer
